@@ -12,6 +12,7 @@ through its offsetParentMatrix, so animating with Maya's own tools moves
 the rig exactly as the rig defines.
 """
 
+import json
 import math
 import os
 
@@ -65,8 +66,25 @@ def Load(stagePath, rigPath=None, name=None):
         cmds.connectAttr("%s.outControlMatrix[%d]" % (node, c),
                          control + ".offsetParentMatrix")
     _BuildMeshes(description, geoGroup, node)
+    _StorePickers(description, node)
     cmds.select(clear=True)
     return node
+
+
+def ChannelPlug(attr):
+    """The Maya attribute a rig avar is animated through: translate, rotate
+    and scale for the transform avars, else the avar's own name
+    (`avars:space` is `space`)."""
+    return _CHANNEL_PLUGS.get(attr) or attr[len("avars:"):].replace(":", "_")
+
+
+def _StorePickers(description, node):
+    """Keeps the rig's control pickers on its node, with the rig path of
+    each control, so the picker opens in saved scenes too."""
+    data = {"pickers": description.get("pickers") or [],
+            "controls": [c["path"] for c in description["controls"]]}
+    cmds.addAttr(node, longName="pickerData", dataType="string")
+    cmds.setAttr(node + ".pickerData", json.dumps(data), type="string")
 
 
 def _SetTables(node, description):
@@ -177,9 +195,8 @@ def _ConnectChannels(description, controls, node):
     for index, channel in enumerate(description["channels"]):
         control = controls[channel["control"]]
         attr = channel["attr"]
-        plug = _CHANNEL_PLUGS.get(attr)
-        if plug is None:
-            plug = attr[len("avars:"):].replace(":", "_")
+        plug = ChannelPlug(attr)
+        if attr not in _CHANNEL_PLUGS:
             if not cmds.attributeQuery(plug, node=control, exists=True):
                 cmds.addAttr(control, longName=plug, attributeType="double",
                              keyable=True)

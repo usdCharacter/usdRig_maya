@@ -11,6 +11,12 @@ def Install():
     window = mel.eval("$rigExecMain = $gMainWindow")
     cmds.menu(_MENU, label="RigExec", parent=window, tearOff=True)
     cmds.menuItem(label="Load Rig...", command=lambda *_: LoadRigDialog())
+    cmds.menuItem(label="Picker", command=lambda *_: ShowPicker())
+
+
+def ShowPicker():
+    from . import picker
+    return picker.Show()
 
 
 def LoadRigDialog():

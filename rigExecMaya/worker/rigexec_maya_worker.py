@@ -273,6 +273,47 @@ class Worker:
                        for m in self.meshes],
         }
 
+    def Pickers(self):
+        """The rig's control pickers, as the records usdRig's picker model
+        reads: panels and buttons, read by usdRig's own picker reader.
+        Empty when the rig has no picker or usdRig has no reader."""
+        try:
+            # Imported only now: the reader looks its schema types up on
+            # import, and they exist once the stage has loaded them.
+            import pickerScene
+        except ImportError:
+            return []
+        pickers = []
+        for prim in pickerScene.find(self.stage):
+            rig = pickerScene.rig_for(prim)
+            if rig is not None and rig.GetPath() != self.rigPath:
+                continue
+            panels, items = [], []
+            for panel in sorted((c for c in prim.GetChildren()
+                                 if c.IsA(pickerScene.PANEL_TYPE)),
+                                key=pickerScene._order):
+                panelId = str(panel.GetPath())
+                size = pickerScene._v(panel, "ui:size", (400.0, 600.0))
+                panels.append({
+                    "id": panelId,
+                    "label": (str(pickerScene._v(panel, "ui:label", ""))
+                              or panel.GetName()),
+                    "w": float(size[0]), "h": float(size[1]),
+                    "fill": pickerScene._rgba(
+                        pickerScene._v(panel, "ui:background"),
+                        (41, 41, 41, 255)),
+                })
+                items.extend(pickerScene._button_record(button, panelId)
+                             for button in panel.GetChildren()
+                             if button.IsA(pickerScene.BUTTON_TYPE))
+            pickers.append({
+                "name": (str(pickerScene._v(prim, "ui:label", ""))
+                         or prim.GetName()),
+                "panels": panels,
+                "items": items,
+            })
+        return pickers
+
     # -- evaluation ----------------------------------------------------
 
     def _AuthoredAt(self, time):
@@ -345,7 +386,9 @@ def Serve(worker, stdin, stdout):
         try:
             op = message[:1]
             if op == protocol.OP_DESCRIBE:
-                reply = protocol.PackJson(worker.Describe())
+                description = worker.Describe()
+                description["pickers"] = worker.Pickers()
+                reply = protocol.PackJson(description)
             elif op == protocol.OP_EVALUATE:
                 time, values = protocol.UnpackEvaluate(message)
                 reply = worker.Evaluate(time, values)

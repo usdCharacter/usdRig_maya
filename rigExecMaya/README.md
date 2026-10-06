@@ -118,6 +118,26 @@ start Maya. Then load a rig in either of these ways:
 
 The worker's log is `rigexec_maya_worker.log` in the temp directory.
 
+## Picker
+
+**RigExec > Picker** opens the rig's control picker in a dockable window,
+with one tab per panel (the biped has Face and Body). The picker comes from
+the rig itself: its `RigExecPicker` prims are read when the rig loads and
+kept on the `rigExecRig` node, so saved scenes keep it.
+
+- Click a button to select its controls, or drag a box to select several.
+  Shift toggles, Ctrl removes, and Alt adds the mirrored side.
+- Selecting in the viewport highlights the matching buttons.
+- The IK/FK switches flip a limb, and the space switches open a menu of
+  spaces. The picker shows only the controls of the half of each limb that
+  is active. With auto key on, a switch is keyed.
+- **Zero Ctrls** returns the selected controls, or all of them, to the
+  rig's default pose. **Ctrl Vis** shows or hides the controls.
+- Ctrl+A selects every control on the panel, and F frames the selection.
+
+The picker uses usdRig's picker rules from the usdRig checkout, so it
+behaves the same as in usdview.
+
 ## Limits
 
 - Only TRS controls get Maya manipulators. The other avars are plain keyable
@@ -125,6 +145,9 @@ The worker's log is `rigexec_maya_worker.log` in the temp directory.
 - Avars that a mover writes are not exposed, because overriding them would
   freeze the rig.
 - Control shapes come from `guide:shape`, not from authored curves.
+- Picker switches set IK/FK and spaces without matching, so the limb or
+  control may jump. Buttons for parts Maya doesn't animate yet, such as the
+  fingers, don't appear.
 - Only UsdPreviewSurface materials come across, as Maya standard surfaces
   with their colors, roughness, metalness and opacity. Other shaders (such
   as the eye shader) show the default material. Textures are not carried
