@@ -129,14 +129,18 @@ kept on the `rigExecRig` node, so saved scenes keep it.
   Shift toggles, Ctrl removes, and Alt adds the mirrored side.
 - Selecting in the viewport highlights the matching buttons.
 - The IK/FK switches flip a limb, and the space switches open a menu of
-  spaces. The picker shows only the controls of the half of each limb that
-  is active. With auto key on, a switch is keyed.
+  spaces. Switches are matched, so nothing moves: switching to IK puts the
+  IK control and pole where the FK arm or leg already is, switching to FK
+  poses the FK controls onto the IK limb, and a new space keeps the control
+  where it was. Each switch is one undo step and, with auto key on, is
+  keyed on every channel it sets. The picker shows only the controls of the
+  half of each limb that is active.
 - **Zero Ctrls** returns the selected controls, or all of them, to the
   rig's default pose. **Ctrl Vis** shows or hides the controls.
 - Ctrl+A selects every control on the panel, and F frames the selection.
 
-The picker uses usdRig's picker rules from the usdRig checkout, so it
-behaves the same as in usdview.
+The picker uses usdRig's picker rules and its IK/FK and space matching from
+the usdRig checkout, so it behaves the same as in usdview.
 
 ## Limits
 
@@ -145,9 +149,12 @@ behaves the same as in usdview.
 - Avars that a mover writes are not exposed, because overriding them would
   freeze the rig.
 - Control shapes come from `guide:shape`, not from authored curves.
-- Picker switches set IK/FK and spaces without matching, so the limb or
-  control may jump. Buttons for parts Maya doesn't animate yet, such as the
-  fingers, don't appear.
+- An IK limb bends only at its hinge, so an FK pose that bends the elbow or
+  knee off its hinge axis can't be matched exactly in IK.
+- The first switch after opening the picker can take a few seconds while
+  the rig loads for matching.
+- Buttons for parts Maya doesn't animate yet, such as the fingers, don't
+  appear.
 - Only UsdPreviewSurface materials come across, as Maya standard surfaces
   with their colors, roughness, metalness and opacity. Other shaders (such
   as the eye shader) show the default material. Textures are not carried

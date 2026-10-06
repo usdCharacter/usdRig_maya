@@ -12,6 +12,10 @@ The first byte of a request names the operation:
     D            describe the rig; the reply is UTF-8 JSON
     E t n v[n]   evaluate at time t (f64) with n (u32) channel values (f64)
                  in describe order; the reply is the frame (see Frame)
+    M json       switch IK/FK or a space without moving anything: the
+                 request names the switch attribute, its new value, the
+                 time and every channel value; the reply is UTF-8 JSON of
+                 the channel values to set
     Q            quit
 
 A reply that starts with b"!" is an error, the rest UTF-8 text.
@@ -22,6 +26,7 @@ import struct
 
 OP_DESCRIBE = b"D"
 OP_EVALUATE = b"E"
+OP_MATCH = b"M"
 OP_QUIT = b"Q"
 ERROR = b"!"
 
@@ -71,6 +76,11 @@ def UnpackEvaluate(payload):
     offset = 1 + _EVAL_HEADER.size
     values = struct.unpack_from("<%dd" % count, payload, offset)
     return time, values
+
+
+def PackMatch(time, values, attr, value):
+    return OP_MATCH + PackJson({"time": float(time), "values": list(values),
+                                "attr": attr, "value": float(value)})
 
 
 def PackJson(obj):

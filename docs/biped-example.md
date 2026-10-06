@@ -84,7 +84,8 @@ Biped_stack_rigExec    the rigExecRig node that drives both
   leave them alone.
 - **Picker**: **RigExec > Picker** opens the biped's Face and Body picker
   panels. Click a button to select its controls, and use the switches to
-  flip a limb between IK and FK or to change a control's space. See
+  flip a limb between IK and FK or to change a control's space, without
+  the limb or control moving. See
   "Picker" in the plug-in README.
 - **Playback**: frames are cached as they play. A pool of background
   workers fills in the rest of the playback range. See "Playback cache" in

@@ -119,6 +119,13 @@ class Client:
         """One frame's bytes, laid out as self.layout describes."""
         return self._Request(protocol.PackEvaluate(time, values))
 
+    def Match(self, time, values, attr, value):
+        """The channel values that set the switch `attr` (a rig attribute
+        path) to `value` without moving the pose: {attribute path: value},
+        the switch included."""
+        return self._Request(protocol.PackMatch(time, values, attr, value),
+                             json=True)
+
     def Close(self):
         process, self._process = self._process, None
         if process is None:

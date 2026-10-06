@@ -21,6 +21,7 @@ controls.
 import importlib.util
 import json
 import os
+import threading
 
 import maya.api.OpenMaya as om
 import maya.cmds as cmds
@@ -105,6 +106,63 @@ class Rig(object):
                         is not None
             self.pickers.append(picker)
 
+    # -- matching --------------------------------------------------------
+
+    def StartMatcher(self):
+        """Starts this rig's matching worker in the background, so the
+        first switch doesn't wait for the rig to load."""
+        if getattr(self, "_starting", None) is None:
+            self._client = None
+            self._error = None
+            # Maya's commands only run here, on the main thread.
+            stage = cmds.getAttr(self.node + ".stagePath")
+            rigPath = cmds.getAttr(self.node + ".rigPath") or None
+            self._starting = threading.Thread(
+                target=self._Start, args=(stage, rigPath), daemon=True)
+            self._starting.start()
+
+    def _Start(self, stage, rigPath):
+        try:
+            self._client = _client.Client(stage, rigPath)
+        except Exception as error:
+            self._error = error
+
+    def Matcher(self):
+        """The worker that solves matched switches (started on demand)."""
+        self.StartMatcher()
+        self._starting.join()
+        if self._client is None:
+            self._starting = None
+            raise RuntimeError(str(self._error or "the worker did not start"))
+        return self._client
+
+    def StopMatcher(self):
+        client, self._client = getattr(self, "_client", None), None
+        self._starting = None
+        if client is not None:
+            client.Close()
+
+    def ChannelValues(self):
+        """Every channel's current value, in the rig's channel order, read
+        the way the rig node reads them."""
+        values = list(cmds.getAttr(self.node + ".channelDefault") or [])
+        fn = om.MFnDependencyNode(
+            om.MSelectionList().add(self.node).getDependNode(0))
+        for name, angle in (("inLinear", False), ("inAngle", True)):
+            array = fn.findPlug(name, False)
+            for i in range(array.numElements()):
+                element = array.elementByPhysicalIndex(i)
+                index = element.logicalIndex()
+                if index < len(values):
+                    values[index] = (element.asMAngle().asDegrees() if angle
+                                     else element.asDouble())
+        return values
+
+    def PlugForPath(self, attrPath):
+        """The Maya plug for `<prim path>.<attribute>`, or None."""
+        primPath, _, attr = attrPath.rpartition(".")
+        return self.Plug(primPath, attr) if primPath else None
+
     def Plug(self, primPath, attr):
         """The Maya plug for a rig attribute, or None when Maya does not
         animate it."""
@@ -116,8 +174,7 @@ class Rig(object):
 
     def DialPlug(self, dial):
         """The plug for a dial, given as `<prim path>.<attribute>`."""
-        primPath, _, attr = dial.rpartition(".")
-        return self.Plug(primPath, attr) if primPath else None
+        return self.PlugForPath(dial)
 
     def Nodes(self, buttons):
         out = []
@@ -553,6 +610,8 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
 
     def Reload(self):
         current = self._rig.node if self._rig else None
+        for rig in self._rigs:
+            rig.StopMatcher()
         try:
             self._rigs = [r for r in _Rigs() if r.pickers]
         except Exception as error:
@@ -580,6 +639,7 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 "No rig with a picker in this scene. Load one from "
                 "RigExec > Load Rig..., then press Refresh.")
             return
+        self._rig.StartMatcher()
         for picker in self._rig.pickers:
             for panel in picker.panels:
                 if not any(b.parent == panel.id and b.live
@@ -702,16 +762,50 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
             value, label = button.next_value(cmds.getAttr(plug))
             if value is None:
                 return
+        self._ApplySwitch(button, value, label)
+
+    def _ApplySwitch(self, button, value, label):
+        """Sets a switch to `value` as one undoable step, matched so
+        nothing moves."""
+        target = button.attr_target
+        plug = self._rig.Plug(target["path"], target["attr"])
+        # Matched: the limb or control keeps its place, and only what
+        # drives it changes. If matching fails the switch still happens.
+        plan, note = {plug: value}, ""
+        try:
+            cmds.waitCursor(state=True)
+            try:
+                solved = self._rig.Matcher().Match(
+                    cmds.currentTime(query=True), self._rig.ChannelValues(),
+                    target["path"] + "." + target["attr"], value)
+            finally:
+                cmds.waitCursor(state=False)
+            plan = {}
+            for attrPath, solvedValue in solved.items():
+                solvedPlug = self._rig.PlugForPath(attrPath)
+                if solvedPlug is not None:
+                    plan[solvedPlug] = solvedValue
+            plan[plug] = value
+            note = ", matched"
+        except Exception as error:
+            om.MGlobal.displayWarning(
+                "RigExec: switched without matching (%s)" % error)
+            note = ", not matched"
         cmds.undoInfo(openChunk=True, chunkName="Switch " + label)
         try:
-            cmds.setAttr(plug, value)
-            if cmds.autoKeyframe(query=True, state=True):
-                cmds.setKeyframe(plug)
+            autoKey = cmds.autoKeyframe(query=True, state=True)
+            for matchedPlug, matchedValue in plan.items():
+                if cmds.getAttr(matchedPlug, lock=True):
+                    continue
+                cmds.setAttr(matchedPlug, matchedValue)
+                if autoKey:
+                    cmds.setKeyframe(matchedPlug)
         finally:
             cmds.undoInfo(closeChunk=True)
         button.value = label
         self._SyncModes()
-        self._status.setText("%s: %s" % (plug.rsplit("|", 1)[-1], label))
+        self._status.setText("%s: %s%s" % (plug.rsplit("|", 1)[-1], label,
+                                            note))
 
     def _ZeroControls(self):
         """Returns the selected controls (or all of them) to the rig's
@@ -770,6 +864,8 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 pass
         self._callbacks = []
         self._timer.stop()
+        for rig in self._rigs:
+            rig.StopMatcher()
 
     def dockCloseEventTriggered(self):
         self._RemoveCallbacks()

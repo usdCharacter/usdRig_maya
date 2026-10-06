@@ -333,6 +333,66 @@ class Worker:
             self._authored[time] = cached
         return cached
 
+    # -- switching without moving ---------------------------------------
+
+    def Match(self, time, values, attr, value):
+        """{attribute path: value} that sets the switch `attr` to `value`
+        and keeps the pose still, solved by usdRig's own IK/FK and space
+        matching. `values` is Maya's pose (every channel), which stands
+        over the stage's own values for the solve. A switch that is neither
+        an IK/FK limb nor a space switch just takes its value."""
+        import ikfkMatch
+        import spaceMatch
+
+        if len(values) != len(self.channels):
+            raise ValueError("expected %d channel values, got %d"
+                             % (len(self.channels), len(values)))
+        attrPath = Sdf.Path(str(attr))
+        authored = self._AuthoredAt(time)
+        current = {}
+        for channelAttr, mine, stageValue in zip(self._channelAttrs, values,
+                                                 authored):
+            if mine != stageValue:
+                current[channelAttr.GetPath()] = float(mine)
+        code = Usd.TimeCode(time)
+        if not hasattr(self, "_written"):
+            self._written = ikfkMatch.RigWritten(self.stage)
+            self._limbs = ikfkMatch.FindLimbs(self.stage)
+            self._rest = {}
+
+        def evaluate(overrides, when):
+            merged = dict(current)
+            merged.update(overrides)
+            self.rig.set_interactive_overrides(
+                [(str(p.GetPrimPath()), p.name, float(v))
+                 for p, v in merged.items()])
+            try:
+                return self.rig.evaluate(
+                    time if when.IsDefault() else when.GetValue())
+            finally:
+                self.rig.clear_interactive_overrides()
+
+        limb = next((l for l in self._limbs if l.switchPath == attrPath),
+                    None)
+        if limb is not None:
+            rest = self._rest.get(limb.blend)
+            if rest is None:
+                rest = ikfkMatch.MeasureRest(limb, self.stage, evaluate, code)
+                self._rest[limb.blend] = rest
+            toIk = abs(value - limb.ikValue) < abs(value - limb.fkValue)
+            plan, _ = ikfkMatch.Plan(limb, self.stage, evaluate, code,
+                                     toIk=toIk, rest=rest,
+                                     written=self._written, current=current)
+        else:
+            control = spaceMatch.SwitchTarget(self.stage, attrPath)
+            if control is None:
+                plan = {attrPath: float(value)}
+            else:
+                plan = spaceMatch.Plan(self.stage, control, attrPath, value,
+                                       code, evaluate, self._written,
+                                       current)
+        return {str(path): float(v) for path, v in plan.items()}
+
     def Evaluate(self, time, values):
         if len(values) != len(self.channels):
             raise ValueError("expected %d channel values, got %d"
@@ -392,6 +452,11 @@ def Serve(worker, stdin, stdout):
             elif op == protocol.OP_EVALUATE:
                 time, values = protocol.UnpackEvaluate(message)
                 reply = worker.Evaluate(time, values)
+            elif op == protocol.OP_MATCH:
+                request = protocol.UnpackJson(message[1:])
+                reply = protocol.PackJson(worker.Match(
+                    request["time"], request["values"], request["attr"],
+                    request["value"]))
             else:
                 raise ValueError("unknown request %r" % op)
         except Exception as error:
