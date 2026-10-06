@@ -1,0 +1,10 @@
+{
+  "Plugins": [{
+    "Type": "python", "Name": "usdMayaRigUsdview", "Root": ".",
+    "LibraryPath": "", "ResourcePath": ".",
+    "Info": {"Types": {"usdMayaRigUsdview.MayaRigContainer": {
+      "bases": ["pxr.Usdviewq.plugin.PluginContainer"],
+      "displayName": "Maya rig control selection"
+    }}}
+  }]
+}

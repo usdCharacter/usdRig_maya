@@ -1,0 +1,38 @@
+# Build outputs
+build/
+build-houdini/
+out/
+install/
+
+# Compiled artifacts
+*.obj
+*.lib
+*.exp
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.ninja_deps
+*.ninja_log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+install_manifest.txt
+Testing/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / OS
+.vs/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db

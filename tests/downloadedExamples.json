@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/Autodesk/maya-usd",
+  "commit": "cd90eeb59d9629ef9a97cd2e34f6f5f95ab3df96",
+  "files": {
+    "Ball_rig.ma": {
+      "url": "https://raw.githubusercontent.com/Autodesk/maya-usd/cd90eeb59d9629ef9a97cd2e34f6f5f95ab3df96/plugin/al/tutorials/endToEndMaya/assets/Ball/Ball_rig.ma",
+      "sourcePage": "https://github.com/Autodesk/maya-usd/blob/cd90eeb59d9629ef9a97cd2e34f6f5f95ab3df96/plugin/al/tutorials/endToEndMaya/assets/Ball/Ball_rig.ma",
+      "sha256": "85d90f5447a86ba1f9ebe80449e00e66ea2fd0336018592aca4240409591bc69"
+    },
+    "UsdExportSkeletonWithIdentityBindPose.ma": {
+      "url": "https://raw.githubusercontent.com/Autodesk/maya-usd/cd90eeb59d9629ef9a97cd2e34f6f5f95ab3df96/test/lib/usd/translators/UsdExportSkeletonTest/UsdExportSkeletonWithIdentityBindPose.ma",
+      "sourcePage": "https://github.com/Autodesk/maya-usd/blob/cd90eeb59d9629ef9a97cd2e34f6f5f95ab3df96/test/lib/usd/translators/UsdExportSkeletonTest/UsdExportSkeletonWithIdentityBindPose.ma",
+      "sha256": "8a8732729a70d4c2ef4ee6e97a74954c4eeb092c3bbd45f4ccf0c8e780c3a68d"
+    }
+  }
+}

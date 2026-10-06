@@ -1,0 +1,9 @@
+{
+  "file": "rhino_rig_001.ma",
+  "repository": "https://github.com/Autodesk/maya-usd",
+  "commit": "cd90eeb59d9629ef9a97cd2e34f6f5f95ab3df96",
+  "url": "https://raw.githubusercontent.com/Autodesk/maya-usd/cd90eeb59d9629ef9a97cd2e34f6f5f95ab3df96/test/testSamples/rhino_rig/rhino_rig_001.ma",
+  "sourcePage": "https://github.com/Autodesk/maya-usd/blob/cd90eeb59d9629ef9a97cd2e34f6f5f95ab3df96/test/testSamples/rhino_rig/rhino_rig_001.ma",
+  "sha256": "22a844f528e32c709d15e2b79849f96d5024a92aeb368801c558bc9f9e4a960c",
+  "note": "Upstream test asset; original file is downloaded verbatim. Referenced texture files are unavailable in this sample."
+}
