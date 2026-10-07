@@ -12,7 +12,7 @@ rem
 rem Environment overrides:
 rem   MAYA_VERSION   Maya release to start (default: 2027)
 rem   MAYA_LOCATION  Maya install (default: the one for MAYA_VERSION)
-rem   RIGEXEC_ROOT   usdRig checkout the worker runs under (default:
+rem   RIGEXEC_ROOT   usdRig checkout that bakes the rig (default:
 rem                  ..\usdRig beside this sidecar)
 setlocal
 

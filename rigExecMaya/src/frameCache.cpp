@@ -5,7 +5,7 @@
 namespace rigExecMaya {
 
 uint64_t
-FrameCache::_Hash(double time, const std::vector<double> &values)
+FrameCache::_Hash(const std::vector<double> &values)
 {
     // FNV-1a over the key's bytes: the same bytes the lookup then compares.
     uint64_t hash = 1469598103934665603ull;
@@ -15,20 +15,19 @@ FrameCache::_Hash(double time, const std::vector<double> &values)
             hash = (hash ^ bytes[i]) * 1099511628211ull;
         }
     };
-    mix(&time, sizeof(time));
     mix(values.data(), values.size() * sizeof(double));
     return hash;
 }
 
 Frame
-FrameCache::Find(double time, const std::vector<double> &values)
+FrameCache::Find(const std::vector<double> &values)
 {
-    const uint64_t hash = _Hash(time, values);
+    const uint64_t hash = _Hash(values);
     std::lock_guard<std::mutex> lock(_mutex);
     auto range = _index.equal_range(hash);
     for (auto it = range.first; it != range.second; ++it) {
         const Entry &entry = *it->second;
-        if (entry.time == time && entry.values == values) {
+        if (entry.values == values) {
             _entries.splice(_entries.begin(), _entries, it->second);
             return entry.frame;
         }
@@ -37,25 +36,24 @@ FrameCache::Find(double time, const std::vector<double> &values)
 }
 
 void
-FrameCache::Insert(double time, const std::vector<double> &values,
-                   Frame frame)
+FrameCache::Insert(const std::vector<double> &values, Frame frame)
 {
     if (!frame || _capacity == 0) {
         return;
     }
-    const uint64_t hash = _Hash(time, values);
+    const uint64_t hash = _Hash(values);
     std::lock_guard<std::mutex> lock(_mutex);
     auto range = _index.equal_range(hash);
     for (auto it = range.first; it != range.second; ++it) {
-        if (it->second->time == time && it->second->values == values) {
+        if (it->second->values == values) {
             return;
         }
     }
-    _entries.push_front(Entry{time, values, std::move(frame)});
+    _entries.push_front(Entry{values, std::move(frame)});
     _index.emplace(hash, _entries.begin());
     while (_entries.size() > _capacity) {
         const auto last = std::prev(_entries.end());
-        const uint64_t lastHash = _Hash(last->time, last->values);
+        const uint64_t lastHash = _Hash(last->values);
         auto victims = _index.equal_range(lastHash);
         for (auto it = victims.first; it != victims.second; ++it) {
             if (it->second == last) {
@@ -82,12 +80,9 @@ FrameCache::Clear()
     _index.clear();
 }
 
-FillPool::FillPool(std::string launcher, std::string rigRoot,
-                   std::string stage, std::string rigPath,
+FillPool::FillPool(std::shared_ptr<const RigSetup> setup,
                    std::shared_ptr<FrameCache> cache, size_t workers)
-    : _launcher(std::move(launcher)), _rigRoot(std::move(rigRoot)),
-      _stage(std::move(stage)), _rigPath(std::move(rigPath)),
-      _cache(std::move(cache))
+    : _setup(std::move(setup)), _cache(std::move(cache))
 {
     for (size_t i = 0; i < workers; ++i) {
         _threads.emplace_back(&FillPool::_Run, this, i);
@@ -137,9 +132,10 @@ FillPool::Pending() const
 void
 FillPool::_Run(size_t)
 {
-    // Each thread owns its worker process outright, started on its first
-    // job so a scene that never plays back never pays for the pool.
-    std::unique_ptr<WorkerProcess> worker;
+    // Each thread owns its evaluator outright (the runtime holds no
+    // locks), opened on its first job so a scene that never plays back
+    // never pays for the pool.
+    std::unique_ptr<RigEvaluator> evaluator;
     for (;;) {
         FillJob job;
         {
@@ -152,19 +148,14 @@ FillPool::_Run(size_t)
             _queue.pop_front();
             ++_running;
         }
-        if (!_cache->Find(job.time, job.values)) {
+        if (!_cache->Find(job.values)) {
             std::string error;
-            if (!worker || !worker->IsRunning()) {
-                worker.reset(new WorkerProcess());
-                if (!worker->Start(_launcher, _rigRoot, _stage, _rigPath,
-                                   &error)) {
-                    worker.reset();
-                }
+            if (!evaluator) {
+                evaluator = RigEvaluator::Create(_setup, &error);
             }
             std::vector<uint8_t> bytes;
-            if (worker && worker->Evaluate(job.time, job.values, &bytes,
-                                           &error)) {
-                _cache->Insert(job.time, job.values,
+            if (evaluator && evaluator->Evaluate(job.values, &bytes, &error)) {
+                _cache->Insert(job.values,
                                std::make_shared<const std::vector<uint8_t>>(
                                    std::move(bytes)));
             }

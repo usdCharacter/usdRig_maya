@@ -21,7 +21,6 @@ controls.
 import importlib.util
 import json
 import os
-import threading
 
 import maya.api.OpenMaya as om
 import maya.cmds as cmds
@@ -32,7 +31,8 @@ try:
 except ImportError:
     from PySide2 import QtCore, QtGui, QtWidgets
 
-from . import client as _client
+from . import export as _export
+from . import matching as _matching
 from . import scene as _scene
 
 _WINDOW = "rigExecPicker"
@@ -43,10 +43,10 @@ _pickerModel = None
 
 def _PickerModel():
     """usdRig's picker model (pure Python, no USD or Qt), loaded from the
-    usdRig checkout the worker runs under."""
+    usdRig checkout."""
     global _pickerModel
     if _pickerModel is None:
-        path = os.path.join(_client.RigExecRoot(), "plugin",
+        path = os.path.join(_export.RigExecRoot(), "plugin",
                             "rigExecUsdview", "pickerModel.py")
         if not os.path.exists(path):
             raise RuntimeError("usdRig's picker model was not found at %s"
@@ -78,16 +78,24 @@ def Show():
 # -- the rig in Maya ----------------------------------------------------------
 
 class Rig(object):
-    """One rigExecRig node's picker data, resolved to Maya nodes."""
+    """One rigExecRig node's picker, IK/FK limbs and space switches,
+    resolved to Maya nodes."""
 
     def __init__(self, node):
         self.node = node
         self.pickers = []
         self.controls = {}          # rig prim path -> Maya control
-        if not cmds.attributeQuery("pickerData", node=node, exists=True):
+        self.controlInfo = {}       # rig prim path -> rotation order, sign
+        self.limbs = []
+        self.spaces = {}
+        if not cmds.attributeQuery("rigData", node=node, exists=True):
             return
-        data = json.loads(cmds.getAttr(node + ".pickerData") or "{}")
-        for index, path in enumerate(data.get("controls") or []):
+        data = json.loads(cmds.getAttr(node + ".rigData") or "{}")
+        self.limbs = data.get("limbs") or []
+        self.spaces = data.get("spaces") or {}
+        for index, info in enumerate(data.get("controls") or []):
+            path = info["path"]
+            self.controlInfo[path] = info
             nodes = cmds.listConnections(
                 "%s.outControlMatrix[%d]" % (node, index),
                 source=False, destination=True) or []
@@ -106,58 +114,6 @@ class Rig(object):
                         is not None
             self.pickers.append(picker)
 
-    # -- matching --------------------------------------------------------
-
-    def StartMatcher(self):
-        """Starts this rig's matching worker in the background, so the
-        first switch doesn't wait for the rig to load."""
-        if getattr(self, "_starting", None) is None:
-            self._client = None
-            self._error = None
-            # Maya's commands only run here, on the main thread.
-            stage = cmds.getAttr(self.node + ".stagePath")
-            rigPath = cmds.getAttr(self.node + ".rigPath") or None
-            self._starting = threading.Thread(
-                target=self._Start, args=(stage, rigPath), daemon=True)
-            self._starting.start()
-
-    def _Start(self, stage, rigPath):
-        try:
-            self._client = _client.Client(stage, rigPath)
-        except Exception as error:
-            self._error = error
-
-    def Matcher(self):
-        """The worker that solves matched switches (started on demand)."""
-        self.StartMatcher()
-        self._starting.join()
-        if self._client is None:
-            self._starting = None
-            raise RuntimeError(str(self._error or "the worker did not start"))
-        return self._client
-
-    def StopMatcher(self):
-        client, self._client = getattr(self, "_client", None), None
-        self._starting = None
-        if client is not None:
-            client.Close()
-
-    def ChannelValues(self):
-        """Every channel's current value, in the rig's channel order, read
-        the way the rig node reads them."""
-        values = list(cmds.getAttr(self.node + ".channelDefault") or [])
-        fn = om.MFnDependencyNode(
-            om.MSelectionList().add(self.node).getDependNode(0))
-        for name, angle in (("inLinear", False), ("inAngle", True)):
-            array = fn.findPlug(name, False)
-            for i in range(array.numElements()):
-                element = array.elementByPhysicalIndex(i)
-                index = element.logicalIndex()
-                if index < len(values):
-                    values[index] = (element.asMAngle().asDegrees() if angle
-                                     else element.asDouble())
-        return values
-
     def PlugForPath(self, attrPath):
         """The Maya plug for `<prim path>.<attribute>`, or None."""
         primPath, _, attr = attrPath.rpartition(".")
@@ -171,6 +127,10 @@ class Rig(object):
             return None
         plug = "%s.%s" % (control, _scene.ChannelPlug(attr))
         return plug if cmds.objExists(plug) else None
+
+    @staticmethod
+    def Get(plug):
+        return cmds.getAttr(plug)
 
     def DialPlug(self, dial):
         """The plug for a dial, given as `<prim path>.<attribute>`."""
@@ -610,8 +570,6 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
 
     def Reload(self):
         current = self._rig.node if self._rig else None
-        for rig in self._rigs:
-            rig.StopMatcher()
         try:
             self._rigs = [r for r in _Rigs() if r.pickers]
         except Exception as error:
@@ -639,7 +597,6 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 "No rig with a picker in this scene. Load one from "
                 "RigExec > Load Rig..., then press Refresh.")
             return
-        self._rig.StartMatcher()
         for picker in self._rig.pickers:
             for panel in picker.panels:
                 if not any(b.parent == panel.id and b.live
@@ -773,13 +730,8 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         # drives it changes. If matching fails the switch still happens.
         plan, note = {plug: value}, ""
         try:
-            cmds.waitCursor(state=True)
-            try:
-                solved = self._rig.Matcher().Match(
-                    cmds.currentTime(query=True), self._rig.ChannelValues(),
-                    target["path"] + "." + target["attr"], value)
-            finally:
-                cmds.waitCursor(state=False)
+            solved = _matching.Plan(
+                self._rig, target["path"] + "." + target["attr"], value)
             plan = {}
             for attrPath, solvedValue in solved.items():
                 solvedPlug = self._rig.PlugForPath(attrPath)
@@ -864,8 +816,6 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
                 pass
         self._callbacks = []
         self._timer.stop()
-        for rig in self._rigs:
-            rig.StopMatcher()
 
     def dockCloseEventTriggered(self):
         self._RemoveCallbacks()

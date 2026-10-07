@@ -1,45 +1,41 @@
 """
-RigExec evaluation worker for the Maya client.
+Exports a RigExec rig for Maya: the baked rig the plug-in evaluates, and a
+description of everything Maya builds around it.
 
-Runs under the Python that owns the rig's USD build (OpenUSD 26.08 with
-OpenExec) and never inside Maya: Maya's own USD has the same library names
-and an older OpenExec, so the two cannot share a process. The client
-starts this script with the RigExec environment, then talks to it over
-stdin/stdout in the framing protocol.py defines.
+Runs once per load, under the Python that owns the rig's USD build (OpenUSD
+26.08 with OpenExec), never inside Maya:
 
-    python rigexec_maya_worker.py <stage.usda> [<rig prim path>]
+    python rigexec_maya_export.py <stage.usda> <out.rigexec> <out.json>
+                                  [<rig prim path>]
 
-The worker opens the stage, compiles its RigExecRoot, and answers describe
-and evaluate requests. Evaluation authors nothing: the client's channel
-values reach the evaluator as interactive overrides.
+The .rigexec is a poseable bake (rigExecBake --poseable): the plug-in poses
+it with Maya's channel values, in Maya's own process and without USD. The
+JSON describes the controls, channels, meshes, materials, control picker,
+IK/FK limbs (with their rest offsets, measured here) and space switches.
 """
 
+import json
 import os
-import struct
+import subprocess
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                os.pardir, "scripts", "rigexec_maya"))
-import protocol  # noqa: E402
-
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade  # noqa: E402
-import rigexec  # noqa: E402
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+import rigexec
 
 # Control avars that configure the control rather than pose it.
 _NON_CHANNELS = {"avars:unitScaleFactor"}
 _CHANNEL_TYPES = {Sdf.ValueTypeNames.Double, Sdf.ValueTypeNames.Float,
                   Sdf.ValueTypeNames.Int, Sdf.ValueTypeNames.Bool}
+# The one frame the rig is baked at. Maya supplies every pose, so the
+# stage's own animation, if any, is not used.
+BAKE_FRAME = 1.0
 
 
 def _Matrix(m):
     return [m[i][j] for i in range(4) for j in range(4)]
 
 
-def _MatrixFromList(values):
-    return Gf.Matrix4d(*[values[i * 4:i * 4 + 4] for i in range(4)])
-
-
-class Worker:
+class Exporter:
     def __init__(self, stagePath, rigPath=None):
         self.stage = Usd.Stage.Open(stagePath)
         if not self.stage:
@@ -58,7 +54,7 @@ class Worker:
         # per-point weight fields only feed a weight-painting overlay.
         self.rig.evaluation_mode = "baked"
         self.rig.publish_weight_fields = False
-        self.time = Usd.TimeCode.Default()
+        self.time = Usd.TimeCode(BAKE_FRAME)
         assetRoot = self.stage.GetPrimAtPath(self.rigPath.GetParentPath())
         self.assetToWorld = UsdGeom.Xformable(assetRoot) \
             .ComputeLocalToWorldTransform(self.time) \
@@ -74,7 +70,7 @@ class Worker:
             if rel:
                 for target in rel.GetTargets():
                     written.add(target)
-        rest = self.rig.evaluate(-1)
+        rest = self.rig.evaluate(BAKE_FRAME)
         framed = set(rest.control_paths())
         providers = set(rest.provider_paths())
 
@@ -91,12 +87,18 @@ class Worker:
             parentIndex = next((i for i in range(index - 1, -1, -1)
                                 if self.controls[i]["path"] == str(parent)),
                                -1)
+            sign = prim.GetAttribute("avars:rotationSign")
+            sign = sign.Get() if sign else None
             self.controls.append({
                 "path": str(path),
                 "name": prim.GetName(),
                 "parent": parentIndex,
                 "rotationOrder": str(prim.GetAttribute(
                     "avars:rotationOrder").Get() or "XYZ"),
+                # +1/-1 per axis: a mirrored limb's avar turns its side the
+                # same way (the effective angle is the value times this).
+                "rotationSign": [-1.0 if float(v) < 0.0 else 1.0
+                                 for v in (sign or (1.0, 1.0, 1.0))],
                 "guide": self._Guide(prim),
             })
             for attr in prim.GetAttributes():
@@ -140,22 +142,15 @@ class Worker:
             }
             entry.update(self._Uvs(prim))
             entry["materials"] = self._Materials(prim)
+            # Placement: the rig moves a mesh whose ancestor a constraint
+            # moves (world = local * provider * assetToWorld); any other
+            # mesh keeps its world matrix.
+            entry["pointsProperty"] = str(prim.GetPath()) + ".points"
+            entry["provider"] = provider or ""
+            entry["local"] = _Matrix(local) if local is not None else None
+            entry["world"] = _Matrix(cache.GetLocalToWorldTransform(prim))
             self.meshes.append(entry)
-            entry["_provider"] = provider
-            entry["_local"] = local
-            entry["_world"] = cache.GetLocalToWorldTransform(prim)
-        self._channelAttrs = [
-            self.stage.GetPrimAtPath(self.controls[c["control"]]["path"])
-            .GetAttribute(c["attr"]) for c in self.channels]
-        self._authored = {}
-        self._varying = [i for i, attr in enumerate(self._channelAttrs)
-                         if attr.ValueMightBeTimeVarying()]
-        self._static = []
-        for attr in self._channelAttrs:
-            value = attr.Get(Usd.TimeCode.Default())
-            self._static.append(float(value) if value is not None else 0.0)
-        self._controlPaths = [c["path"] for c in self.controls]
-        self.layout = protocol.FrameLayout(self.Describe())
+        self.written = written
 
     def _ProviderOf(self, prim, providers, cache):
         """The nearest ancestor-or-self a constraint moves, and the prim's
@@ -260,6 +255,7 @@ class Worker:
 
     def Describe(self):
         return {
+            "bakeFrame": BAKE_FRAME,
             "stage": self.stage.GetRootLayer().identifier,
             "rigPath": str(self.rigPath),
             "upAxis": str(UsdGeom.GetStageUpAxis(self.stage)),
@@ -269,8 +265,10 @@ class Worker:
             "assetToWorld": _Matrix(self.assetToWorld),
             "controls": self.controls,
             "channels": self.channels,
-            "meshes": [{k: v for k, v in m.items() if not k.startswith("_")}
-                       for m in self.meshes],
+            "meshes": self.meshes,
+            "pickers": self.Pickers(),
+            "limbs": self.Limbs(),
+            "spaces": self.Spaces(),
         }
 
     def Pickers(self):
@@ -314,176 +312,94 @@ class Worker:
             })
         return pickers
 
-    # -- evaluation ----------------------------------------------------
-
-    def _AuthoredAt(self, time):
-        """Every channel's stage value at a time. Most channels hold one
-        value for all time, read once; only the ones that might vary are
-        read again, and those answers are cached per time (the stage is
-        never edited, so an answer stands)."""
-        cached = self._authored.get(time)
-        if cached is None:
-            cached = list(self._static)
-            code = Usd.TimeCode(time)
-            for index in self._varying:
-                value = self._channelAttrs[index].Get(code)
-                cached[index] = float(value) if value is not None else 0.0
-            if len(self._authored) > 256:
-                self._authored.clear()
-            self._authored[time] = cached
-        return cached
-
     # -- switching without moving ---------------------------------------
 
-    def Match(self, time, values, attr, value):
-        """{attribute path: value} that sets the switch `attr` to `value`
-        and keeps the pose still, solved by usdRig's own IK/FK and space
-        matching. `values` is Maya's pose (every channel), which stands
-        over the stage's own values for the solve. A switch that is neither
-        an IK/FK limb nor a space switch just takes its value."""
-        import ikfkMatch
-        import spaceMatch
-
-        if len(values) != len(self.channels):
-            raise ValueError("expected %d channel values, got %d"
-                             % (len(self.channels), len(values)))
-        attrPath = Sdf.Path(str(attr))
-        authored = self._AuthoredAt(time)
-        current = {}
-        for channelAttr, mine, stageValue in zip(self._channelAttrs, values,
-                                                 authored):
-            if mine != stageValue:
-                current[channelAttr.GetPath()] = float(mine)
-        code = Usd.TimeCode(time)
-        if not hasattr(self, "_written"):
-            self._written = ikfkMatch.RigWritten(self.stage)
-            self._limbs = ikfkMatch.FindLimbs(self.stage)
-            self._rest = {}
-
-        def evaluate(overrides, when):
-            merged = dict(current)
-            merged.update(overrides)
-            self.rig.set_interactive_overrides(
-                [(str(p.GetPrimPath()), p.name, float(v))
-                 for p, v in merged.items()])
-            try:
-                return self.rig.evaluate(
-                    time if when.IsDefault() else when.GetValue())
-            finally:
-                self.rig.clear_interactive_overrides()
-
-        limb = next((l for l in self._limbs if l.switchPath == attrPath),
-                    None)
-        if limb is not None:
-            rest = self._rest.get(limb.blend)
-            if rest is None:
-                rest = ikfkMatch.MeasureRest(limb, self.stage, evaluate, code)
-                self._rest[limb.blend] = rest
-            toIk = abs(value - limb.ikValue) < abs(value - limb.fkValue)
-            plan, _ = ikfkMatch.Plan(limb, self.stage, evaluate, code,
-                                     toIk=toIk, rest=rest,
-                                     written=self._written, current=current)
-        else:
-            control = spaceMatch.SwitchTarget(self.stage, attrPath)
-            if control is None:
-                plan = {attrPath: float(value)}
-            else:
-                plan = spaceMatch.Plan(self.stage, control, attrPath, value,
-                                       code, evaluate, self._written,
-                                       current)
-        return {str(path): float(v) for path, v in plan.items()}
-
-    def Evaluate(self, time, values):
-        if len(values) != len(self.channels):
-            raise ValueError("expected %d channel values, got %d"
-                             % (len(self.channels), len(values)))
-        # Only the channels whose value differs from what the stage already
-        # answers at this time: an override per channel costs the evaluator
-        # far more than the handful a pose actually moves.
-        authored = self._AuthoredAt(time)
-        overrides = []
-        for channel, value, stageValue in zip(self.channels, values, authored):
-            if value != stageValue:
-                control = self.controls[channel["control"]]
-                overrides.append((control["path"], channel["attr"], value))
-        if overrides:
-            self.rig.set_interactive_overrides(overrides)
-        else:
-            self.rig.clear_interactive_overrides()
-        pose = self.rig.evaluate(time)
-        out = bytearray(self.layout.size)
-        for mesh, offset in zip(self.meshes, self.layout.pointOffsets):
-            if mesh["moved"]:
-                try:
-                    data = pose.moved_points_bytes(mesh["path"] + ".points")
-                except KeyError:
-                    continue
-                out[offset:offset + len(data)] = data
-            else:
-                rest = struct.pack("<%df" % len(mesh["points"]),
-                                   *mesh["points"])
-                out[offset:offset + len(rest)] = rest
-        offset = self.layout.controlMatricesOffset
-        frames = pose.control_matrices_bytes(self._controlPaths)
-        out[offset:offset + len(frames)] = frames
-        offset += len(frames)
-        providerPaths = set(pose.provider_paths())
-        for mesh in self.meshes:
-            world = mesh["_world"]
-            if mesh["_provider"] in providerPaths:
-                world = mesh["_local"] * _MatrixFromList(
-                    pose.provider_xform(mesh["_provider"])) * self.assetToWorld
-            struct.pack_into("<16d", out, offset, *_Matrix(world))
-            offset += 128
-        return bytes(out)
-
-
-def Serve(worker, stdin, stdout):
-    while True:
-        message = protocol.ReadMessage(stdin)
-        if message is None or message[:1] == protocol.OP_QUIT:
-            return
+    def _Evaluate(self, overrides, time):
+        """A pose with `overrides` ({attribute path: value}) applied, for
+        usdRig's matching code."""
+        self.rig.set_interactive_overrides(
+            [(str(p.GetPrimPath()), p.name, float(v))
+             for p, v in overrides.items()])
         try:
-            op = message[:1]
-            if op == protocol.OP_DESCRIBE:
-                description = worker.Describe()
-                description["pickers"] = worker.Pickers()
-                reply = protocol.PackJson(description)
-            elif op == protocol.OP_EVALUATE:
-                time, values = protocol.UnpackEvaluate(message)
-                reply = worker.Evaluate(time, values)
-            elif op == protocol.OP_MATCH:
-                request = protocol.UnpackJson(message[1:])
-                reply = protocol.PackJson(worker.Match(
-                    request["time"], request["values"], request["attr"],
-                    request["value"]))
-            else:
-                raise ValueError("unknown request %r" % op)
-        except Exception as error:
-            reply = protocol.ERROR + str(error).encode("utf-8")
-        protocol.WriteMessage(stdout, reply)
+            return self.rig.evaluate(BAKE_FRAME)
+        finally:
+            self.rig.clear_interactive_overrides()
+
+    def Limbs(self):
+        """Every IK/FK limb, found and measured by usdRig's own matching
+        code: its controls and joints, and the offsets between them at
+        rest that a matched switch keeps."""
+        try:
+            import ikfkMatch
+        except ImportError:
+            return []
+        limbs = []
+        for limb in ikfkMatch.FindLimbs(self.stage):
+            if limb.rigRoot != self.rigPath:
+                continue
+            rest = ikfkMatch.MeasureRest(limb, self.stage, self._Evaluate,
+                                         self.time)
+            limbs.append({
+                "switch": str(limb.switchPath),
+                "ikValue": float(limb.ikValue),
+                "joints": [str(p) for p in limb.joints],
+                "fkControls": [str(p) for p in limb.fkControls],
+                "ikControl": str(limb.ikControl),
+                "effector": str(limb.effector),
+                "pole": str(limb.pole) if limb.pole is not None else "",
+                "fkOffsets": [_Matrix(m) for m in rest.fk],
+                "effectorOffset": _Matrix(rest.effector),
+                "poleDistance": float(rest.poleDistance or 0.0),
+            })
+        return limbs
+
+    def Spaces(self):
+        """{space attribute path: the control it moves}, for every space
+        switch."""
+        spaces = {}
+        for prim in Usd.PrimRange(self.stage.GetPrimAtPath(self.rigPath)):
+            if prim.GetTypeName() != "RigExecSpaceSwitch":
+                continue
+            attrs = prim.GetRelationship("rigExec:activeSpaceAttribute")
+            targets = prim.GetRelationship("rigExec:target")
+            if not attrs or not targets or not targets.GetTargets():
+                continue
+            for attr in attrs.GetTargets():
+                spaces[str(attr)] = str(targets.GetTargets()[0])
+        return spaces
+
+
+def Bake(stagePath, rigPath, output):
+    """The poseable bake, by usdRig's own baking tool."""
+    root = os.environ.get("RIG") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir,
+        os.pardir, "usdRig")
+    tool = os.path.join(root, "build", "rigExecBake")
+    if sys.platform == "win32":
+        tool += ".exe"
+    if not os.path.exists(tool):
+        raise RuntimeError("usdRig's rigExecBake was not found at %s; build "
+                           "usdRig first" % tool)
+    result = subprocess.run(
+        [tool, stagePath, "--rig", str(rigPath), "--frames",
+         repr(BAKE_FRAME), "--poseable", "-o", output],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if result.returncode != 0 or not os.path.exists(output):
+        raise RuntimeError("baking the rig failed:\n" +
+                           result.stdout.decode("utf-8", "replace")[-2000:])
 
 
 def main(argv):
-    if len(argv) < 2:
+    if len(argv) < 4:
         sys.stderr.write(__doc__)
         return 2
-    # The reply stream gets a private copy of fd 1, and fd 1 itself is
-    # pointed at stderr: anything printed from Python or from C++ lands in
-    # the log, never inside a reply.
-    stdin = sys.stdin.buffer
-    stdout = os.fdopen(os.dup(1), "wb")
-    sys.stdout.flush()
-    os.dup2(2, 1)
-    sys.stdout = sys.stderr
-    try:
-        worker = Worker(argv[1], argv[2] if len(argv) > 2 else None)
-    except Exception as error:
-        protocol.WriteMessage(stdout, protocol.ERROR +
-                              str(error).encode("utf-8"))
-        return 1
-    protocol.WriteMessage(stdout, b"ready")
-    Serve(worker, stdin, stdout)
+    stagePath, rigFile, jsonFile = argv[1:4]
+    exporter = Exporter(stagePath, argv[4] if len(argv) > 4 else None)
+    Bake(stagePath, exporter.rigPath, rigFile)
+    description = exporter.Describe()
+    description["rigFile"] = os.path.abspath(rigFile)
+    with open(jsonFile, "w") as out:
+        json.dump(description, out, separators=(",", ":"))
     return 0
 
 

@@ -1,8 +1,8 @@
 # usdMayaRig
 
 > This sidecar also carries **`rigExecMaya/`**, the Maya 2027 plug-in that
-> animates a RigExec rig inside Maya (the `rigExecRig` node plus a worker
-> process running `../usdRig`). Build it with `build_rigexecmaya.bat` and
+> animates a RigExec rig inside Maya (the `rigExecRig` node, playing a rig
+> baked by `../usdRig`). Build it with `build_rigexecmaya.bat` and
 > start Maya with `launch_maya.bat [<rig.usda>]`.
 >
 > **To set up and run the biped example, see

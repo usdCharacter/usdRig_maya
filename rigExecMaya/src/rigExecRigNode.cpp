@@ -1,6 +1,7 @@
-// rigExecRig: drives a Maya scene from a RigExec rig evaluated in the
-// worker process (see workerProcess.h). No USD is linked here: Maya's own
-// USD has the same library names and an older OpenExec.
+// rigExecRig: drives a Maya scene from a RigExec rig, evaluated in Maya's
+// own process by usdRig's runtime from a poseable .rigexec bake (see
+// rigEvaluator.h). No USD is linked here: Maya's own USD has the same
+// library names and an older OpenExec, and the runtime needs none.
 //
 // Inputs are every animator channel (inLinear / inAngle, indexed by the
 // rig's channel order) and the time. Outputs:
@@ -11,12 +12,12 @@
 //                        own translate/rotate/scale composed on top, it
 //                        lands exactly on the frame the rig computed
 //
-// The tables (control parents, rotate orders, TRS channel slots, channel
-// defaults, mesh point counts) are set once by rigexec_maya.scene, which
-// reads them from the worker's description.
+// The tables (the rig file, channel and control paths, control parents,
+// rotate orders, TRS channel slots, channel defaults, mesh placement) are
+// set once by rigexec_maya.scene from the rig's export.
 
 #include "frameCache.h"
-#include "workerProcess.h"
+#include "rigEvaluator.h"
 
 #include <maya/MAngle.h>
 #include <maya/MAnimControl.h>
@@ -35,6 +36,11 @@
 #include <maya/MEulerRotation.h>
 #include <maya/MFloatPointArray.h>
 #include <maya/MFnDoubleArrayData.h>
+#include <maya/MFnStringArrayData.h>
+#include <maya/MStringArray.h>
+#include <maya/MSyntax.h>
+#include <maya/MArgDatabase.h>
+#include <maya/MSelectionList.h>
 #include <maya/MFnIntArrayData.h>
 #include <maya/MFnMatrixAttribute.h>
 #include <maya/MFnMesh.h>
@@ -58,6 +64,8 @@
 #include <chrono>
 #include <thread>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -67,66 +75,10 @@ using rigExecMaya::FillJob;
 using rigExecMaya::FillPool;
 using rigExecMaya::Frame;
 using rigExecMaya::FrameCache;
-using rigExecMaya::WorkerProcess;
+using rigExecMaya::RigEvaluator;
+using rigExecMaya::RigSetup;
 
 namespace {
-
-// Where the plugin was loaded from, for the worker launcher and the RigExec
-// checkout or install it belongs to.
-std::string gPluginDirectory;
-
-std::string
-Parent(const std::string &path)
-{
-    const size_t slash = path.find_last_of("/\\");
-    return slash == std::string::npos ? std::string(".")
-                                      : path.substr(0, slash);
-}
-
-std::string
-Launcher()
-{
-    // Beside the plugin in this module; RIGEXEC_ROOT only picks the RigExec
-    // checkout the launcher runs under.
-    const std::string worker = Parent(gPluginDirectory) + "/worker/";
-#ifdef _WIN32
-    return worker + "launch_worker.bat";
-#else
-    return worker + "launch_worker.sh";
-#endif
-}
-
-std::string
-RigExecRoot()
-{
-    if (const char *explicitRoot = std::getenv("RIGEXEC_ROOT")) {
-        return explicitRoot;
-    }
-    // plug-ins -> rigExecMaya -> this sidecar, staged beside the usdRig
-    // checkout.
-    return Parent(Parent(Parent(gPluginDirectory))) + "/usdRig";
-}
-
-// One worker per (stage, rig) in this Maya process, shared by every node
-// that names it.
-std::map<std::string, std::unique_ptr<WorkerProcess>> gWorkers;
-
-WorkerProcess *
-Worker(const std::string &stage, const std::string &rigPath,
-       std::string *error)
-{
-    const std::string key = stage + "\n" + rigPath;
-    std::unique_ptr<WorkerProcess> &worker = gWorkers[key];
-    if (worker && worker->IsRunning()) {
-        return worker.get();
-    }
-    worker.reset(new WorkerProcess());
-    if (!worker->Start(Launcher(), RigExecRoot(), stage, rigPath, error)) {
-        worker.reset();
-        return nullptr;
-    }
-    return worker.get();
-}
 
 const MEulerRotation::RotationOrder kOrders[] = {
     MEulerRotation::kXYZ, MEulerRotation::kYZX, MEulerRotation::kZXY,
@@ -149,6 +101,9 @@ public:
     static MObject aStagePath, aRigPath, aTime, aInLinear, aInAngle, aInMesh;
     static MObject aControlParent, aControlRotateOrder, aControlTrs;
     static MObject aChannelDefault, aMeshPointCount;
+    static MObject aRigFile, aBakeFrame, aChannelPath, aControlPath;
+    static MObject aMeshPoints, aMeshProvider, aMeshLocal, aMeshWorld;
+    static MObject aAssetToWorld;
     static MObject aOutMesh, aOutMeshMatrix, aOutControlMatrix;
 
     static void *creator() { return new RigExecRigNode(); }
@@ -163,6 +118,12 @@ public:
     size_t CachedFrames() const { return _cache->Size(); }
     size_t PendingFrames() const { return _pool ? _pool->Pending() : 0; }
 
+    // For rigExecFrames: the frames of `paths` with the rig posed as Maya
+    // has it now and `overrides` on top.
+    bool Frames(const std::vector<std::pair<std::string, double>> &overrides,
+                const std::vector<std::string> &paths,
+                std::vector<double> *frames, std::string *error);
+
 private:
     struct Tables {
         std::vector<int> parent, rotateOrder, trs, pointCount;
@@ -172,6 +133,9 @@ private:
     };
 
     bool _ReadTables(MDataBlock &data, Tables *tables);
+    // The loaded rig, (re)built when the rig file or its tables change.
+    bool _Load(MDataBlock &data, const Tables &tables, std::string *error);
+    std::vector<double> _CurrentChannels();
     std::vector<double> _ReadChannels(MDataBlock &data, const Tables &tables);
     MMatrix _Trs(int control, const Tables &tables,
                  const std::vector<double> &values) const;
@@ -186,9 +150,10 @@ private:
     // the full request; capacity from RIGEXEC_MAYA_CACHE_FRAMES.
     std::shared_ptr<FrameCache> _cache;
     std::unique_ptr<FillPool> _pool;
-    std::string _stage, _rigPath;
-    // Set by a compute that had to ask its worker: the animation, or the
-    // values it is played with, may have changed.
+    std::shared_ptr<const RigSetup> _setup;
+    std::unique_ptr<RigEvaluator> _evaluator;
+    // Set by a compute that had to evaluate: the animation, or the values
+    // it is played with, may have changed.
     bool _needsFill = false;
 };
 
@@ -198,7 +163,12 @@ MObject RigExecRigNode::aStagePath, RigExecRigNode::aRigPath,
     RigExecRigNode::aInAngle, RigExecRigNode::aInMesh,
     RigExecRigNode::aControlParent, RigExecRigNode::aControlRotateOrder,
     RigExecRigNode::aControlTrs, RigExecRigNode::aChannelDefault,
-    RigExecRigNode::aMeshPointCount, RigExecRigNode::aOutMesh,
+    RigExecRigNode::aMeshPointCount, RigExecRigNode::aRigFile,
+    RigExecRigNode::aBakeFrame, RigExecRigNode::aChannelPath,
+    RigExecRigNode::aControlPath, RigExecRigNode::aMeshPoints,
+    RigExecRigNode::aMeshProvider, RigExecRigNode::aMeshLocal,
+    RigExecRigNode::aMeshWorld, RigExecRigNode::aAssetToWorld,
+    RigExecRigNode::aOutMesh,
     RigExecRigNode::aOutMeshMatrix, RigExecRigNode::aOutControlMatrix;
 
 MStatus
@@ -232,6 +202,20 @@ RigExecRigNode::initialize()
                                    MFnData::kDoubleArray);
     aMeshPointCount = typed.create("meshPointCount", "mpc",
                                    MFnData::kIntArray);
+    aRigFile = typed.create("rigFile", "rf", MFnData::kString);
+    aBakeFrame = numeric.create("bakeFrame", "bf", MFnNumericData::kDouble,
+                                1.0);
+    aChannelPath = typed.create("channelPath", "chp",
+                                MFnData::kStringArray);
+    aControlPath = typed.create("controlPath", "cpt",
+                                MFnData::kStringArray);
+    aMeshPoints = typed.create("meshPoints", "mpt", MFnData::kStringArray);
+    aMeshProvider = typed.create("meshProvider", "mpv",
+                                 MFnData::kStringArray);
+    aMeshLocal = typed.create("meshLocal", "mlo", MFnData::kDoubleArray);
+    aMeshWorld = typed.create("meshWorld", "mwo", MFnData::kDoubleArray);
+    aAssetToWorld = typed.create("assetToWorld", "atw",
+                                 MFnData::kDoubleArray);
 
     aOutMesh = typed.create("outMesh", "om", MFnData::kMesh);
     typed.setArray(true);
@@ -252,7 +236,10 @@ RigExecRigNode::initialize()
     const MObject inputs[] = {aStagePath, aRigPath, aTime, aInLinear,
                               aInAngle, aInMesh, aControlParent,
                               aControlRotateOrder, aControlTrs,
-                              aChannelDefault, aMeshPointCount};
+                              aChannelDefault, aMeshPointCount, aRigFile,
+                              aBakeFrame, aChannelPath, aControlPath,
+                              aMeshPoints, aMeshProvider, aMeshLocal,
+                              aMeshWorld, aAssetToWorld};
     const MObject outputs[] = {aOutMesh, aOutMeshMatrix, aOutControlMatrix};
     for (const MObject &a : inputs) {
         addAttribute(a);
@@ -269,6 +256,30 @@ RigExecRigNode::initialize()
 }
 
 namespace {
+
+std::vector<std::string>
+StringArray(MDataBlock &data, const MObject &attribute)
+{
+    MFnStringArrayData fn(data.inputValue(attribute).data());
+    const MStringArray array = fn.array();
+    std::vector<std::string> out(array.length());
+    for (unsigned i = 0; i < array.length(); ++i) {
+        out[i] = array[i].asChar();
+    }
+    return out;
+}
+
+std::vector<double>
+DoubleArray(MDataBlock &data, const MObject &attribute)
+{
+    MFnDoubleArrayData fn(data.inputValue(attribute).data());
+    const MDoubleArray array = fn.array();
+    std::vector<double> out(array.length());
+    for (unsigned i = 0; i < array.length(); ++i) {
+        out[i] = array[i];
+    }
+    return out;
+}
 
 std::vector<int>
 IntArray(MDataBlock &data, const MObject &attribute)
@@ -351,44 +362,38 @@ RigExecRigNode::compute(const MPlug &plug, MDataBlock &data)
         MGlobal::displayError("rigExecRig: the rig tables do not agree");
         return MS::kFailure;
     }
-    const std::string stage =
-        data.inputValue(aStagePath).asString().asChar();
-    const std::string rigPath =
-        data.inputValue(aRigPath).asString().asChar();
     const double time =
         data.inputValue(aTime).asTime().as(MTime::uiUnit());
     std::vector<double> values = _ReadChannels(data, tables);
 
-    if (stage != _stage || rigPath != _rigPath) {
-        _pool.reset();
-        _cache->Clear();
-        _stage = stage;
-        _rigPath = rigPath;
+    std::string error;
+    if (!_Load(data, tables, &error)) {
+        MGlobal::displayError(("rigExecRig: " + error).c_str());
+        return MS::kFailure;
     }
-    if (!_frame || time != _time || values != _values) {
-        Frame frame = _cache->Find(time, values);
+    if (!_frame || values != _values) {
+        Frame frame = _cache->Find(values);
         if (!frame) {
-            std::string error;
-            WorkerProcess *worker = Worker(stage, rigPath, &error);
             std::vector<uint8_t> bytes;
-            if (!worker || !worker->Evaluate(time, values, &bytes, &error)) {
+            if (!_evaluator->Evaluate(values, &bytes, &error)) {
                 MGlobal::displayError(("rigExecRig: " + error).c_str());
                 return MS::kFailure;
             }
             frame = std::make_shared<const std::vector<uint8_t>>(
                 std::move(bytes));
-            _cache->Insert(time, values, frame);
+            _cache->Insert(values, frame);
             _needsFill = true;
         }
         if (frame->size() != tables.size) {
             MGlobal::displayError(
-                "rigExecRig: the worker's frame does not match this rig");
+                "rigExecRig: the evaluated frame does not match this rig");
             return MS::kFailure;
         }
         _frame = std::move(frame);
-        _time = time;
         _values.swap(values);
     }
+    // The playhead, which only orders the playback fill.
+    _time = time;
     if (attribute == aOutControlMatrix) {
         _WriteControls(data, tables);
     } else if (attribute == aOutMeshMatrix) {
@@ -397,6 +402,142 @@ RigExecRigNode::compute(const MPlug &plug, MDataBlock &data)
         _WriteMeshes(data, tables);
     }
     return MS::kSuccess;
+}
+
+bool
+RigExecRigNode::_Load(MDataBlock &data, const Tables &tables,
+                      std::string *error)
+{
+    const std::string file = data.inputValue(aRigFile).asString().asChar();
+    std::vector<std::string> channels = StringArray(data, aChannelPath);
+    if (_setup && _evaluator && _setup->file == file &&
+        _setup->channelPaths == channels) {
+        return true;
+    }
+    _pool.reset();
+    _cache->Clear();
+    _frame.reset();
+    _evaluator.reset();
+    _setup.reset();
+    if (file.empty()) {
+        *error = "no rig file; load the rig again from RigExec > Load Rig";
+        return false;
+    }
+    auto setup = std::make_shared<RigSetup>();
+    setup->file = file;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) {
+        *error = "cannot read the rig file " + file +
+                 "; load the rig again from RigExec > Load Rig";
+        return false;
+    }
+    setup->bytes = std::make_shared<const std::vector<uint8_t>>(
+        std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    setup->bakeFrame = data.inputValue(aBakeFrame).asDouble();
+    setup->channelPaths = std::move(channels);
+    setup->bakedValues = tables.defaults;
+    setup->controlPaths = StringArray(data, aControlPath);
+    const std::vector<std::string> points = StringArray(data, aMeshPoints);
+    const std::vector<std::string> providers =
+        StringArray(data, aMeshProvider);
+    const std::vector<double> locals = DoubleArray(data, aMeshLocal);
+    const std::vector<double> worlds = DoubleArray(data, aMeshWorld);
+    const std::vector<double> asset = DoubleArray(data, aAssetToWorld);
+    const size_t meshes = tables.pointCount.size();
+    if (setup->bakedValues.size() != setup->channelPaths.size() ||
+        setup->controlPaths.size() != tables.parent.size() ||
+        points.size() != meshes || providers.size() != meshes ||
+        locals.size() != meshes * 16 || worlds.size() != meshes * 16 ||
+        asset.size() != 16) {
+        *error = "the rig tables do not agree";
+        return false;
+    }
+    std::copy(asset.begin(), asset.end(), setup->assetToWorld);
+    MArrayDataHandle inputs = data.inputArrayValue(aInMesh);
+    for (size_t m = 0; m < meshes; ++m) {
+        RigSetup::Mesh mesh;
+        mesh.points = points[m];
+        mesh.provider = providers[m];
+        mesh.count = size_t(tables.pointCount[m]);
+        std::copy(locals.begin() + 16 * m, locals.begin() + 16 * (m + 1),
+                  mesh.local);
+        std::copy(worlds.begin() + 16 * m, worlds.begin() + 16 * (m + 1),
+                  mesh.world);
+        // Rest points, for a mesh the rig does not move.
+        if (inputs.jumpToElement(unsigned(m))) {
+            MObject source = inputs.inputValue().asMesh();
+            if (!source.isNull()) {
+                MFloatPointArray rest;
+                MFnMesh(source).getPoints(rest, MSpace::kObject);
+                if (rest.length() == mesh.count) {
+                    mesh.rest.resize(mesh.count * 3);
+                    for (unsigned i = 0; i < rest.length(); ++i) {
+                        mesh.rest[3 * i] = rest[i].x;
+                        mesh.rest[3 * i + 1] = rest[i].y;
+                        mesh.rest[3 * i + 2] = rest[i].z;
+                    }
+                }
+            }
+        }
+        setup->meshes.push_back(std::move(mesh));
+    }
+    _evaluator = RigEvaluator::Create(setup, error);
+    if (!_evaluator) {
+        return false;
+    }
+    if (!_evaluator->Refused().empty()) {
+        MGlobal::displayWarning(
+            MString("rigExecRig: ") +
+            unsigned(_evaluator->Refused().size()) +
+            " channels are not inputs of the baked rig and do not move it");
+    }
+    _setup = std::move(setup);
+    return true;
+}
+
+std::vector<double>
+RigExecRigNode::_CurrentChannels()
+{
+    std::vector<double> values =
+        _setup ? _setup->bakedValues : std::vector<double>();
+    const MObject self = thisMObject();
+    for (const auto &[attribute, angle] :
+         {std::make_pair(aInLinear, false), std::make_pair(aInAngle, true)}) {
+        MPlug array(self, attribute);
+        MIntArray indices;
+        array.getExistingArrayAttributeIndices(indices);
+        for (unsigned i = 0; i < indices.length(); ++i) {
+            const size_t index = size_t(indices[i]);
+            if (index < values.size()) {
+                const MPlug element =
+                    array.elementByLogicalIndex(unsigned(indices[i]));
+                values[index] = angle ? element.asMAngle().asDegrees()
+                                      : element.asDouble();
+            }
+        }
+    }
+    return values;
+}
+
+bool
+RigExecRigNode::Frames(
+    const std::vector<std::pair<std::string, double>> &overrides,
+    const std::vector<std::string> &paths, std::vector<double> *frames,
+    std::string *error)
+{
+    if (!_evaluator) {
+        // Loads the rig through the node's own compute.
+        MPlug(thisMObject(), aOutControlMatrix).elementByLogicalIndex(0)
+            .asMObject();
+    }
+    if (!_evaluator) {
+        *error = "the rig is not loaded";
+        return false;
+    }
+    // The node's next compute re-poses the evaluator from scratch, so it is
+    // free to use here; its cached frame stays as it was.
+    return _evaluator->Frames(_CurrentChannels(), overrides, paths, frames,
+                              error);
 }
 
 MMatrix
@@ -544,7 +685,7 @@ RigExecRigNode::~RigExecRigNode()
 void
 RigExecRigNode::FillPlaybackCache()
 {
-    if (!_needsFill || !_frame || _stage.empty()) {
+    if (!_needsFill || !_frame || !_setup) {
         return;
     }
     _needsFill = false;
@@ -599,7 +740,7 @@ RigExecRigNode::FillPlaybackCache()
                         : channel.source.asDouble();
             }
         }
-        if (!_cache->Find(job.time, job.values)) {
+        if (!_cache->Find(job.values)) {
             jobs.push_back(std::move(job));
         }
     }
@@ -617,8 +758,7 @@ RigExecRigNode::FillPlaybackCache()
                          return da < db;
                      });
     if (!_pool) {
-        _pool.reset(new FillPool(Launcher(), RigExecRoot(), _stage, _rigPath,
-                                 _cache, workers));
+        _pool.reset(new FillPool(_setup, _cache, workers));
     }
     _pool->Submit(std::move(jobs));
 }
@@ -660,17 +800,69 @@ public:
     }
 };
 
+// rigExecFrames <node> [-set <attribute path> <value>]... -frame <path>...
+// The asset-space frames (16 doubles each, row-major) of the rig's controls
+// or joints at the given paths, with the rig posed as Maya has it now and
+// each -set value on top. Nothing in the scene changes. Matching IK/FK and
+// space switches is built on this (rigexec_maya.matching).
+class RigExecFramesCommand : public MPxCommand
+{
+public:
+    static void *creator() { return new RigExecFramesCommand(); }
+    MStatus doIt(const MArgList &args) override
+    {
+        MString name;
+        std::vector<std::pair<std::string, double>> overrides;
+        std::vector<std::string> paths;
+        for (unsigned i = 0; i < args.length(); ++i) {
+            const MString arg = args.asString(i);
+            if ((arg == "-set" || arg == "-s") && i + 2 < args.length()) {
+                const std::string path = args.asString(i + 1).asChar();
+                overrides.emplace_back(path, args.asDouble(i + 2));
+                i += 2;
+            } else if ((arg == "-frame" || arg == "-f") &&
+                       i + 1 < args.length()) {
+                paths.push_back(args.asString(++i).asChar());
+            } else {
+                name = arg;
+            }
+        }
+        for (RigExecRigNode *node : gNodes) {
+            if (MFnDependencyNode(node->thisMObject()).name() != name) {
+                continue;
+            }
+            std::vector<double> frames;
+            std::string error;
+            if (!node->Frames(overrides, paths, &frames, &error)) {
+                displayError(("rigExecFrames: " + error).c_str());
+                return MS::kFailure;
+            }
+            MDoubleArray result;
+            for (double value : frames) {
+                result.append(value);
+            }
+            setResult(result);
+            return MS::kSuccess;
+        }
+        displayError("rigExecFrames: no rigExecRig node named " + name);
+        return MS::kFailure;
+    }
+};
+
 MStatus
 initializePlugin(MObject plugin)
 {
     MFnPlugin fn(plugin, "RigExec", "0.1", "Any");
-    gPluginDirectory = fn.loadPath().asChar();
     MStatus status = fn.registerNode("rigExecRig", RigExecRigNode::id,
                                      RigExecRigNode::creator,
                                      RigExecRigNode::initialize);
     if (status) {
         status = fn.registerCommand("rigExecCache",
                                     RigExecCacheCommand::creator);
+    }
+    if (status) {
+        status = fn.registerCommand("rigExecFrames",
+                                    RigExecFramesCommand::creator);
     }
     if (status) {
         gFillCallback = MTimerMessage::addTimerCallback(0.25f, OnFillTimer,
@@ -686,8 +878,8 @@ uninitializePlugin(MObject plugin)
         MMessage::removeCallback(gFillCallback);
         gFillCallback = 0;
     }
-    gWorkers.clear();
     MFnPlugin fn(plugin);
+    fn.deregisterCommand("rigExecFrames");
     fn.deregisterCommand("rigExecCache");
     return fn.deregisterNode(RigExecRigNode::id);
 }

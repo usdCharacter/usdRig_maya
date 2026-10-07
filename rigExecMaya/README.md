@@ -6,29 +6,30 @@ evaluates the rig, and Maya shows the deformed meshes.
 
 ## How it works
 
-Maya ships its own USD (25.11 with MayaUSD 0.37), which has the same library
-names as RigExec's 26.08 build and an older OpenExec. The two cannot share a
-process, so the rig runs in a **worker process** under RigExec's own Python and
-USD. Maya talks to the worker over a pipe.
+The rig runs inside Maya. Loading a rig exports it once: usdRig bakes it to a
+poseable `.rigexec` file and describes what Maya needs to build around it.
+From then on the `rigExecRig` node plays that bake with usdRig's runtime, in
+Maya's own process. The runtime links no USD, so it doesn't clash with Maya's
+own USD (25.11 with MayaUSD 0.37, which has the same library names as
+usdRig's 26.08 build).
 
-- `plug-ins/rigExecMaya.mll` contains the `rigExecRig` node (C++, devkit only,
-  no USD). It reads every control channel and the time, asks the worker for
-  the frame, and writes back three outputs:
+- `plug-ins/rigExecMaya.mll` contains the `rigExecRig` node. It poses the
+  bake with every control channel and writes back three outputs:
   - each mesh's deformed points;
   - each mesh's world matrix;
   - each control's `offsetParentMatrix`. With the control's own
     translate/rotate/scale on top, this matrix lands the control exactly on
     the frame the rig computed.
-- `worker/rigexec_maya_worker.py` opens the stage, compiles the rig, and
-  evaluates it with Maya's channel values as interactive overrides. It sends
-  only the channels that differ from the stage. It runs the baked program,
-  which gives the same answers as the dynamic path several times faster.
-  It also skips the per-point weight fields, which only feed a
-  weight-painting overlay.
-- `scripts/rigexec_maya` builds the Maya scene (`scene.Load`), defines the
-  wire format (`protocol.py`), and starts the worker from Python
-  (`client.py`). The worker is started with Maya's `PXR_*`, Python and USD
-  environment removed. Otherwise the worker would load Maya's USD libraries.
+- `export/rigexec_maya_export.py` runs once per load, under the usdRig
+  checkout's own Python and USD (Maya's Python and USD settings are kept
+  away from it). It bakes the rig with usdRig's `rigExecBake --poseable`, and
+  writes a description of the controls, channels, meshes, materials, control
+  picker, IK/FK limbs and space switches.
+- `scripts/rigexec_maya` runs the export (`export.py`) and builds the Maya
+  scene (`scene.Load`).
+
+Exported rigs are kept in `cache/` in this module, or in `RIGEXEC_MAYA_CACHE`
+when that is set. A saved scene points at its rig's bake there.
 
 `scene.Load` builds the following:
 - one Maya transform per rig control, mirroring the control hierarchy. Only
@@ -42,30 +43,26 @@ USD. Maya talks to the worker over a pipe.
 - the meshes the rig deforms;
 - the `rigExecRig` node between them.
 
-Saved scenes reopen normally, and the node starts its worker on first use.
+Saved scenes reopen normally, as long as the exported rig is still in the
+cache. If it's gone, load the rig again.
 
 ## Playback cache
 
-Every frame the node evaluates is kept, keyed by the full request: the time
-and every channel value. A lookup compares the whole key, so an edit to any
-channel misses and nothing is ever invalidated or served stale.
+Every frame the node evaluates is kept, keyed by every channel value. A
+lookup compares the whole key, so an edit to any channel misses and nothing
+is ever invalidated or served stale.
 
 Four times a second, the node checks whether a recent evaluation missed the
 cache. If one did, it works out the frames of the playback range:
 - it reads the animated channels at each frame;
 - channels with no animation hold their current value.
 
-A pool of extra worker processes then evaluates the missing frames in
-background threads, nearest the current frame first. The node's own worker
-stays free for interactive edits.
-
-On the biped, live playback runs at about 22 fps and playback from the
-cache at about 140 fps. A 120-frame range fills in about 3.5 s, and a
-cached frame matches a live evaluation exactly.
+A pool of background threads then evaluates the missing frames, nearest
+the current frame first, each with its own copy of the rig. The node's own
+copy stays free for interactive edits.
 
 - `RIGEXEC_MAYA_FILL_WORKERS`: pool size (default: an eighth of the
-  hardware threads, at most 8; `0` turns the pool off). Each worker holds
-  its own copy of the rig, about 250 MB for the biped.
+  hardware threads, at most 8; `0` turns the pool off).
 - `RIGEXEC_MAYA_CACHE_FRAMES`: frames kept per node (default 2000, about
   1 GB for the biped); the least recently used go first.
 - `rigExecCache [-wait] <node>` returns `{cached, pending}`. With `-wait` it
@@ -75,20 +72,26 @@ cached frame matches a live evaluation exactly.
 
 - Maya 2027 and its devkit (`devkitBase`). On Windows the Maya install
   itself carries the `include/` and `lib/` the build needs.
-- A built usdRig checkout: the worker runs `bin/_env.bat` (or `_env.sh`)
-  from it and imports its `rigexec` module. By default this is `../usdRig`
-  beside this sidecar; set `RIGEXEC_ROOT` to use another.
+- A built usdRig checkout. The plug-in compiles in its runtime sources
+  (`libs/rigExecRuntime`, `libs/rigExecBinary`), and loading a rig runs its
+  `bin/_env.bat` (or `_env.sh`), its `rigexec` module and its `rigExecBake`
+  tool. By default this is `../usdRig` beside this sidecar; set
+  `RIGEXEC_ROOT` to use another.
 
 ## Build
 
 From the sidecar root, `build_rigexecmaya.bat` runs this configure, with
-`MAYA_DEVKIT_LOCATION` defaulting to the Maya 2027 install:
+`MAYA_DEVKIT_LOCATION` defaulting to the Maya 2027 install and `RIGEXEC_ROOT`
+to `../usdRig`:
 
 ```bat
 cmake -S rigExecMaya -B build-rigexecmaya -G Ninja -DCMAKE_BUILD_TYPE=Release ^
-      -DMAYA_DEVKIT_LOCATION=<path to devkitBase>
+      -DMAYA_DEVKIT_LOCATION=<path to devkitBase> -DRIGEXEC_ROOT=<usdRig>
 cmake --build build-rigexecmaya
 ```
+
+Rebuild the plug-in after updating usdRig, so its runtime reads the bakes
+usdRig writes.
 
 The plug-in is written to `plug-ins/`, or to `RIGEXEC_MAYA_PLUGIN_DIR` when
 that is set. `MAYA_DEVKIT_LOCATION` may also be set in the environment
@@ -115,8 +118,6 @@ start Maya. Then load a rig in either of these ways:
   import rigexec_maya.scene
   rigexec_maya.scene.Load(r"C:/path/to/Biped_stack.usda")
   ```
-
-The worker's log is `rigexec_maya_worker.log` in the temp directory.
 
 ## Picker
 
@@ -151,13 +152,13 @@ the usdRig checkout, so it behaves the same as in usdview.
 - Control shapes come from `guide:shape`, not from authored curves.
 - An IK limb bends only at its hinge, so an FK pose that bends the elbow or
   knee off its hinge axis can't be matched exactly in IK.
-- The first switch after opening the picker can take a few seconds while
-  the rig loads for matching.
 - Buttons for parts Maya doesn't animate yet, such as the fingers, don't
   appear.
 - Only UsdPreviewSurface materials come across, as Maya standard surfaces
   with their colors, roughness, metalness and opacity. Other shaders (such
   as the eye shader) show the default material. Textures are not carried
   over. Meshes get their `st` UVs.
-- An uncached frame costs one evaluation of the rig: about 27 ms for a drag
-  on the biped, 36 ms when the time changes too.
+- The rig is baked at one frame, and Maya supplies every pose: animation
+  stored in the USD file itself isn't played.
+- A channel the bake doesn't take as an input can be animated in Maya but
+  doesn't move the rig; loading the rig warns how many there are.

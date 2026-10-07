@@ -1,14 +1,15 @@
 @echo off
 rem Configures and builds the rigExecMaya plug-in (the rigExecRig node) into
 rem rigExecMaya\plug-ins, where rigExecMaya.mod picks it up. The node links
-rem only the Maya devkit: the rig is evaluated by a worker process under the
-rem usdRig checkout's own Python and USD (see rigExecMaya\README.md).
+rem the Maya devkit and usdRig's USD-free runtime, compiled in from the
+rem usdRig checkout (see rigExecMaya\README.md).
 rem
 rem Usage: build_rigexecmaya.bat
 rem
 rem Environment overrides:
-rem   RIG                   usdRig repo root, for _vcvars.bat (default:
-rem                         ..\usdRig beside this sidecar)
+rem   RIG                   usdRig repo root, for _vcvars.bat and the
+rem                         runtime sources (default: ..\usdRig beside this
+rem                         sidecar)
 rem   MAYA_VERSION          Maya release to build for (default: 2027)
 rem   MAYA_DEVKIT_LOCATION  devkitBase, or a Maya install carrying include\
 rem                         and lib\ (default: the Maya install for
@@ -37,7 +38,8 @@ if defined RIGEXEC_MAYA_PLUGIN_DIR set "PLUGIN_DIR_ARG=-DRIGEXEC_MAYA_PLUGIN_DIR
 
 cmake -S "%SIDECAR%\rigExecMaya" -B "%BUILD%" -G Ninja ^
       -DCMAKE_BUILD_TYPE=Release ^
-      -DMAYA_DEVKIT_LOCATION="%MAYA_DEVKIT_LOCATION%" %PLUGIN_DIR_ARG%
+      -DMAYA_DEVKIT_LOCATION="%MAYA_DEVKIT_LOCATION%" ^
+      -DRIGEXEC_ROOT="%RIG%" %PLUGIN_DIR_ARG%
 if errorlevel 1 exit /b 1
 cmake --build "%BUILD%"
 exit /b %errorlevel%

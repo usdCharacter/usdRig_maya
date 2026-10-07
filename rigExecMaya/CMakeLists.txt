@@ -1,6 +1,7 @@
-# The rigExecRig Maya node. Builds against a Maya devkit only -- no USD and
-# no RigExec libraries: the rig is evaluated by the worker process, which
-# runs RigExec's own build (see worker/).
+# The rigExecRig Maya node. Builds against a Maya devkit and usdRig's
+# USD-free runtime, whose sources are compiled in from the usdRig checkout
+# (RIGEXEC_ROOT, by default ../usdRig beside this sidecar). No USD is
+# linked: the rig is a poseable .rigexec bake, played in Maya's process.
 #
 #   cmake -S rigExecMaya -B build-rigexecmaya -G Ninja ^
 #         -DMAYA_DEVKIT_LOCATION=<devkitBase>
@@ -22,10 +23,33 @@ if (NOT EXISTS "${MAYA_DEVKIT_LOCATION}/include/maya/MFnPlugin.h")
         "(got '${MAYA_DEVKIT_LOCATION}')")
 endif()
 
+set(RIGEXEC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../usdRig" CACHE PATH
+    "The usdRig checkout whose runtime is compiled in")
+if (NOT EXISTS "${RIGEXEC_ROOT}/libs/rigExecRuntime/runtime.h")
+    message(FATAL_ERROR
+        "RIGEXEC_ROOT must name a usdRig checkout (got '${RIGEXEC_ROOT}')")
+endif()
+# usdRig's runtime and the binary format it reads: no USD in either.
+file(GLOB _rigexec_runtime_sources
+    "${RIGEXEC_ROOT}/libs/rigExecRuntime/*.cpp"
+    "${RIGEXEC_ROOT}/libs/rigExecBinary/*.cpp")
+add_library(rigExecMayaRuntime STATIC ${_rigexec_runtime_sources})
+target_include_directories(rigExecMayaRuntime PUBLIC "${RIGEXEC_ROOT}/libs")
+set_target_properties(rigExecMayaRuntime PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+# The runtime's results must match usdRig's bit for bit.
+if (MSVC)
+    target_compile_options(rigExecMayaRuntime PRIVATE /fp:precise /bigobj)
+    target_compile_definitions(rigExecMayaRuntime PRIVATE NOMINMAX)
+else()
+    target_compile_options(rigExecMayaRuntime PRIVATE -fno-fast-math)
+endif()
+
 add_library(rigExecMaya MODULE
     src/rigExecRigNode.cpp
-    src/workerProcess.cpp
+    src/rigEvaluator.cpp
     src/frameCache.cpp)
+target_link_libraries(rigExecMaya PRIVATE rigExecMayaRuntime)
 target_include_directories(rigExecMaya PRIVATE "${MAYA_DEVKIT_LOCATION}/include")
 target_link_directories(rigExecMaya PRIVATE "${MAYA_DEVKIT_LOCATION}/lib")
 target_link_libraries(rigExecMaya PRIVATE OpenMaya OpenMayaAnim Foundation)

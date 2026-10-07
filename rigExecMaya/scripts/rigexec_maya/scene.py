@@ -19,7 +19,7 @@ import os
 import maya.api.OpenMaya as om
 import maya.cmds as cmds
 
-from . import client as _client
+from . import export as _export
 
 PLUGIN = "rigExecMaya"
 _CHANNEL_PLUGS = {
@@ -35,18 +35,17 @@ _ROTATE_ORDER_INDEX = {"XYZ": 0, "YZX": 1, "ZXY": 2, "XZY": 3, "YXZ": 4,
 
 
 def Load(stagePath, rigPath=None, name=None):
-    """Builds the rig and returns its rigExecRig node."""
+    """Exports the rig (a poseable bake and its description, made once by
+    usdRig outside Maya), builds it, and returns its rigExecRig node."""
+    description = _export.Export(stagePath, rigPath)
+    return Build(description, name)
+
+
+def Build(description, name=None):
+    """Builds an exported rig and returns its rigExecRig node."""
     if not cmds.pluginInfo(PLUGIN, query=True, loaded=True):
         cmds.loadPlugin(PLUGIN)
-    stagePath = os.path.abspath(stagePath).replace("\\", "/")
-    # A short-lived worker describes the rig; the node starts its own to
-    # evaluate (and again whenever the scene is reopened).
-    describer = _client.Client(stagePath, rigPath,
-                               log=om.MGlobal.displayInfo)
-    try:
-        description = describer.description
-    finally:
-        describer.Close()
+    stagePath = description["stage"]
     name = name or os.path.splitext(os.path.basename(stagePath))[0]
 
     top = cmds.createNode("transform", name=name)
@@ -66,7 +65,7 @@ def Load(stagePath, rigPath=None, name=None):
         cmds.connectAttr("%s.outControlMatrix[%d]" % (node, c),
                          control + ".offsetParentMatrix")
     _BuildMeshes(description, geoGroup, node)
-    _StorePickers(description, node)
+    _StoreRigData(description, node)
     cmds.select(clear=True)
     return node
 
@@ -78,13 +77,23 @@ def ChannelPlug(attr):
     return _CHANNEL_PLUGS.get(attr) or attr[len("avars:"):].replace(":", "_")
 
 
-def _StorePickers(description, node):
-    """Keeps the rig's control pickers on its node, with the rig path of
-    each control, so the picker opens in saved scenes too."""
-    data = {"pickers": description.get("pickers") or [],
-            "controls": [c["path"] for c in description["controls"]]}
-    cmds.addAttr(node, longName="pickerData", dataType="string")
-    cmds.setAttr(node + ".pickerData", json.dumps(data), type="string")
+def _StoreRigData(description, node):
+    """Keeps what the picker and matched switches need on the rig's node, so
+    they work in saved scenes too: the pickers, each control's path and
+    rotation, each channel, the IK/FK limbs and the space switches."""
+    data = {
+        "pickers": description.get("pickers") or [],
+        "controls": [{"path": c["path"], "name": c["name"],
+                      "rotationOrder": c["rotationOrder"],
+                      "rotationSign": c.get("rotationSign") or [1, 1, 1]}
+                     for c in description["controls"]],
+        "channels": [[c["control"], c["attr"]]
+                     for c in description["channels"]],
+        "limbs": description.get("limbs") or [],
+        "spaces": description.get("spaces") or {},
+    }
+    cmds.addAttr(node, longName="rigData", dataType="string")
+    cmds.setAttr(node + ".rigData", json.dumps(data), type="string")
 
 
 def _SetTables(node, description):
@@ -103,9 +112,30 @@ def _SetTables(node, description):
     cmds.setAttr(node + ".channelDefault",
                  [c["default"] for c in description["channels"]],
                  type="doubleArray")
-    cmds.setAttr(node + ".meshPointCount",
-                 [m["pointCount"] for m in description["meshes"]],
+    meshes = description["meshes"]
+    cmds.setAttr(node + ".meshPointCount", [m["pointCount"] for m in meshes],
                  type="Int32Array")
+    # The baked rig and how to read it back.
+    cmds.setAttr(node + ".rigFile", description["rigFile"], type="string")
+    cmds.setAttr(node + ".bakeFrame", description.get("bakeFrame", 1.0))
+    paths = ["%s.%s" % (controls[c["control"]]["path"], c["attr"])
+             for c in description["channels"]]
+    cmds.setAttr(node + ".channelPath", len(paths), *paths,
+                 type="stringArray")
+    cmds.setAttr(node + ".controlPath", len(controls),
+                 *[c["path"] for c in controls], type="stringArray")
+    cmds.setAttr(node + ".meshPoints", len(meshes),
+                 *[m["pointsProperty"] for m in meshes], type="stringArray")
+    cmds.setAttr(node + ".meshProvider", len(meshes),
+                 *[m["provider"] for m in meshes], type="stringArray")
+    identity = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
+    cmds.setAttr(node + ".meshLocal",
+                 [v for m in meshes for v in (m["local"] or identity)],
+                 type="doubleArray")
+    cmds.setAttr(node + ".meshWorld", [v for m in meshes for v in m["world"]],
+                 type="doubleArray")
+    cmds.setAttr(node + ".assetToWorld", description["assetToWorld"],
+                 type="doubleArray")
 
 
 # -- controls ---------------------------------------------------------------
