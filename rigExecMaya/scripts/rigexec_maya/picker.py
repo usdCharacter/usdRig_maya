@@ -168,6 +168,179 @@ class Rig(object):
                 out.append((source, index))
         return out
 
+    # -- the picker's state and actions, shared by every picker view -------
+
+    def Buttons(self):
+        return [b for picker in self.pickers for b in picker.buttons]
+
+    def SelectedPaths(self):
+        """The rig paths of the selected controls."""
+        selected = set(cmds.ls(selection=True, long=True) or [])
+        return set(path for path, node in self.controls.items()
+                   if node in selected)
+
+    def Modes(self):
+        """{dial: "ik" or "fk"} for each limb in one mode, and every
+        switch's value read back from Maya. True as the second value when
+        a switch's value changed."""
+        modes = {}
+        changed = False
+        for button in self.Buttons():
+            if button.dial and button.dial not in modes:
+                plug = self.DialPlug(button.dial)
+                value = cmds.getAttr(plug) if plug else None
+                if value is not None:
+                    if value >= 0.999:
+                        modes[button.dial] = "ik"
+                    elif value <= 0.001:
+                        modes[button.dial] = "fk"
+            target = button.attr_target
+            if target and button.live:
+                plug = self.Plug(target["path"], target["attr"])
+                label = button.label_for(cmds.getAttr(plug))
+                if label and label != button.value:
+                    button.value = label
+                    changed = True
+        return modes, changed
+
+    def SyncToggles(self):
+        group = self.ControlsGroup()
+        shown = bool(group) and bool(cmds.getAttr(group + ".visibility"))
+        for button in self.Buttons():
+            if button.command == "ctrl_vis":
+                button.checked = shown
+
+    def Pick(self, buttons, mode, status=None, parent=None):
+        """What a click or a box does: selects the buttons' controls
+        ("replace", "toggle" or "remove"), or, on a plain click of one
+        command or switch button, runs it."""
+        status = status or (lambda text: None)
+        # A command or switch acts only on a plain click of one button, so
+        # a marquee across a limb never flips it or zeroes the rig.
+        if len(buttons) == 1 and mode == "replace":
+            button = buttons[0]
+            if button.command == "zero_ctrls":
+                self.ZeroControls(status)
+                return
+            if button.command == "ctrl_vis":
+                self.ToggleControls()
+                return
+            if button.attr_target:
+                self.Switch(button, status, parent)
+                return
+        nodes = self.Nodes(buttons)
+        if mode == "replace":
+            if nodes:
+                cmds.select(nodes, replace=True)
+            else:
+                cmds.select(clear=True)
+        elif mode == "remove":
+            if nodes:
+                cmds.select(nodes, deselect=True)
+        elif nodes:
+            cmds.select(nodes, toggle=True)
+
+    def Switch(self, button, status=None, parent=None):
+        """Sets a switch: IK/FK toggles, a space switch offers a menu."""
+        status = status or (lambda text: None)
+        target = button.attr_target
+        plug = self.Plug(target["path"], target["attr"])
+        if plug is None:
+            return
+        labels = target.get("enum") or []
+        if len(labels) > 2:
+            menu = QtWidgets.QMenu(parent)
+            for name in labels:
+                action = menu.addAction(str(name))
+                action.setCheckable(True)
+                action.setChecked(name == button.value)
+            picked = menu.exec(QtGui.QCursor.pos())
+            if picked is None:
+                return
+            label = picked.text()
+            value = float(labels.index(label))
+            if target.get("invert"):
+                value = float(len(labels) - 1) - value
+        else:
+            value, label = button.next_value(cmds.getAttr(plug))
+            if value is None:
+                return
+        self.ApplySwitch(button, value, label, status)
+
+    def ApplySwitch(self, button, value, label, status=None):
+        """Sets a switch to `value` as one undoable step, matched so
+        nothing moves."""
+        status = status or (lambda text: None)
+        target = button.attr_target
+        plug = self.Plug(target["path"], target["attr"])
+        # Matched: the limb or control keeps its place, and only what
+        # drives it changes. If matching fails the switch still happens.
+        plan, note = {plug: value}, ""
+        try:
+            solved = _matching.Plan(
+                self, target["path"] + "." + target["attr"], value)
+            plan = {}
+            for attrPath, solvedValue in solved.items():
+                solvedPlug = self.PlugForPath(attrPath)
+                if solvedPlug is not None:
+                    plan[solvedPlug] = solvedValue
+            plan[plug] = value
+            note = ", matched"
+        except Exception as error:
+            om.MGlobal.displayWarning(
+                "RigExec: switched without matching (%s)" % error)
+            note = ", not matched"
+        cmds.undoInfo(openChunk=True, chunkName="Switch " + label)
+        try:
+            autoKey = cmds.autoKeyframe(query=True, state=True)
+            for matchedPlug, matchedValue in plan.items():
+                if cmds.getAttr(matchedPlug, lock=True):
+                    continue
+                cmds.setAttr(matchedPlug, matchedValue)
+                if autoKey:
+                    cmds.setKeyframe(matchedPlug)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        button.value = label
+        self.Modes()
+        status("%s: %s%s" % (plug.rsplit("|", 1)[-1], label,
+                                            note))
+
+    def ZeroControls(self, status=None):
+        """Returns the selected controls (or all of them) to the rig's
+        default pose."""
+        status = status or (lambda text: None)
+        selected = set(cmds.ls(selection=True, long=True) or [])
+        controls = set(self.controls.values())
+        chosen = (selected & controls) or controls
+        defaults = cmds.getAttr(self.node + ".channelDefault") or []
+        cmds.undoInfo(openChunk=True, chunkName="Zero controls")
+        reset = 0
+        try:
+            for plug, index in self.ChannelSources():
+                node = cmds.ls(plug.split(".", 1)[0], long=True)
+                if not node or node[0] not in chosen \
+                        or index >= len(defaults):
+                    continue
+                if cmds.getAttr(plug, lock=True):
+                    continue
+                cmds.setAttr(plug, defaults[index])
+                reset += 1
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.Modes()
+        status("Zeroed %d channels on %s." % (
+            reset, "the selected controls" if selected & controls
+            else "every control"))
+
+    def ToggleControls(self):
+        group = self.ControlsGroup()
+        if group is None:
+            return
+        cmds.setAttr(group + ".visibility",
+                     not cmds.getAttr(group + ".visibility"))
+        self.SyncToggles()
+
 
 def _Rigs():
     return [Rig(node) for node in cmds.ls(type="rigExecRig") or []]
@@ -264,6 +437,117 @@ def _Polygon(path, points, roundness):
     path.closeSubpath()
 
 
+def DrawButton(painter, button, hover=None, selected=()):
+    """One picker button, in panel coordinates: lit when `hover` is
+    its id, outlined when `selected` holds all its targets."""
+    painter.save()
+    painter.translate(button.x, button.y)
+    if button.rotation:
+        painter.translate(button.w * 0.5, button.h * 0.5)
+        painter.rotate(button.rotation)
+        painter.translate(-button.w * 0.5, -button.h * 0.5)
+
+    fill = QtGui.QColor(*button.fill)
+    if not button.decoration and not button.live:
+        fill.setAlpha(int(fill.alpha() * _DIM))
+    if button.id == hover and button.live:
+        fill = fill.lighter(125)
+    painter.setBrush(QtGui.QBrush(fill))
+    if button.targets and set(selected).issuperset(button.targets):
+        pen = QtGui.QPen(QtGui.QColor(255, 255, 255))
+        pen.setWidthF(2.0)
+    else:
+        pen = QtGui.QPen(QtGui.QColor(*button.stroke))
+        pen.setWidthF(max(button.stroke_width, 0.5))
+    painter.setPen(pen)
+    painter.drawPath(_PathFor(button))
+
+    if button.checkbox:
+        side = min(button.h - 4.0, 11.0)
+        top = (button.h - side) * 0.5
+        left = 3.0 if button.h_align != "right" else \
+            button.w - side - 3.0
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(58, 58, 58)))
+        painter.setPen(QtGui.QPen(QtGui.QColor(18, 18, 18)))
+        painter.drawRect(QtCore.QRectF(left, top, side, side))
+        if button.checked:
+            tick = QtGui.QPen(QtGui.QColor(120, 200, 255))
+            tick.setWidthF(1.8)
+            painter.setPen(tick)
+            painter.drawPolyline([
+                QtCore.QPointF(left + side * 0.20, top + side * 0.52),
+                QtCore.QPointF(left + side * 0.44, top + side * 0.76),
+                QtCore.QPointF(left + side * 0.82, top + side * 0.24)])
+
+    if button.text or button.value:
+        _DrawText(painter, button)
+    painter.restore()
+
+def _DrawText(painter, button):
+    """The label, and a switch's current value with a menu caret."""
+    font = QtGui.QFont()
+    font.setPixelSize(max(int(round(button.font_size)), 5))
+    font.setBold(button.bold)
+    box = QtCore.QRectF(2, 0, button.w - 4, button.h)
+    both = " ".join(x for x in (button.text, button.value) if x)
+    for _ in range(6):
+        if (QtGui.QFontMetricsF(font).horizontalAdvance(both)
+                <= box.width() - (14.0 if button.value else 0.0)
+                or font.pixelSize() <= 5):
+            break
+        font.setPixelSize(font.pixelSize() - 1)
+    painter.setFont(font)
+    align = {"left": QtCore.Qt.AlignLeft,
+             "right": QtCore.Qt.AlignRight}.get(
+                 button.h_align, QtCore.Qt.AlignHCenter)
+    if button.checkbox:
+        box.setLeft(box.left() + min(button.h - 4.0, 11.0) + 5.0)
+        align = QtCore.Qt.AlignLeft
+
+    labelBox, valueBox, valueAlign, caretX = box, None, None, 0.0
+    if button.value:
+        metrics = QtGui.QFontMetricsF(font)
+        want = min(metrics.horizontalAdvance(button.value) + 14.0,
+                   box.width())
+        if not button.text:
+            want = box.width()
+            labelBox = None
+        if align == QtCore.Qt.AlignRight:
+            valueBox = QtCore.QRectF(box.left() + 12, box.top(),
+                                     want - 12, box.height())
+            valueAlign = QtCore.Qt.AlignLeft
+            caretX = box.left() + 5
+            if labelBox is not None:
+                labelBox = QtCore.QRectF(box)
+                labelBox.setLeft(box.left() + want)
+        else:
+            valueBox = QtCore.QRectF(box.right() - want, box.top(),
+                                     want - 12, box.height())
+            valueAlign = QtCore.Qt.AlignRight
+            caretX = box.right() - 7
+            if labelBox is not None:
+                labelBox = QtCore.QRectF(box)
+                labelBox.setRight(box.right() - want)
+
+    if button.text and labelBox is not None:
+        painter.setPen(QtGui.QColor(*button.text_color))
+        painter.drawText(labelBox, align | QtCore.Qt.AlignVCenter,
+                         button.text)
+    if button.value:
+        painter.setPen(QtGui.QColor(*button.value_color))
+        painter.drawText(valueBox, valueAlign | QtCore.Qt.AlignVCenter,
+                         button.value)
+        mid = box.center().y()
+        caret = QtGui.QPainterPath()
+        caret.moveTo(caretX - 3.2, mid - 1.6)
+        caret.lineTo(caretX + 3.2, mid - 1.6)
+        caret.lineTo(caretX, mid + 2.2)
+        caret.closeSubpath()
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(*button.value_color)))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawPath(caret)
+
+
 class PanelView(QtWidgets.QWidget):
     """One picker panel, drawn and clickable."""
 
@@ -312,7 +596,7 @@ class PanelView(QtWidgets.QWidget):
                                        self._ch))
         for button in self._picker.visible(self._panel.id,
                                            modes=self._modes):
-            self._Draw(painter, button)
+            DrawButton(painter, button, self._hover, self._selected)
         if self._band is not None:
             x0, y0, x1, y1 = self._band
             painter.setBrush(QtGui.QBrush(QtGui.QColor(120, 200, 255, 40)))
@@ -320,114 +604,6 @@ class PanelView(QtWidgets.QWidget):
             painter.drawRect(QtCore.QRectF(min(x0, x1), min(y0, y1),
                                            abs(x1 - x0), abs(y1 - y0)))
         painter.end()
-
-    def _Draw(self, painter, button):
-        painter.save()
-        painter.translate(button.x, button.y)
-        if button.rotation:
-            painter.translate(button.w * 0.5, button.h * 0.5)
-            painter.rotate(button.rotation)
-            painter.translate(-button.w * 0.5, -button.h * 0.5)
-
-        fill = QtGui.QColor(*button.fill)
-        if not button.decoration and not button.live:
-            fill.setAlpha(int(fill.alpha() * _DIM))
-        if button.id == self._hover and button.live:
-            fill = fill.lighter(125)
-        painter.setBrush(QtGui.QBrush(fill))
-        if button.targets and self._selected.issuperset(button.targets):
-            pen = QtGui.QPen(QtGui.QColor(255, 255, 255))
-            pen.setWidthF(2.0)
-        else:
-            pen = QtGui.QPen(QtGui.QColor(*button.stroke))
-            pen.setWidthF(max(button.stroke_width, 0.5))
-        painter.setPen(pen)
-        painter.drawPath(_PathFor(button))
-
-        if button.checkbox:
-            side = min(button.h - 4.0, 11.0)
-            top = (button.h - side) * 0.5
-            left = 3.0 if button.h_align != "right" else \
-                button.w - side - 3.0
-            painter.setBrush(QtGui.QBrush(QtGui.QColor(58, 58, 58)))
-            painter.setPen(QtGui.QPen(QtGui.QColor(18, 18, 18)))
-            painter.drawRect(QtCore.QRectF(left, top, side, side))
-            if button.checked:
-                tick = QtGui.QPen(QtGui.QColor(120, 200, 255))
-                tick.setWidthF(1.8)
-                painter.setPen(tick)
-                painter.drawPolyline([
-                    QtCore.QPointF(left + side * 0.20, top + side * 0.52),
-                    QtCore.QPointF(left + side * 0.44, top + side * 0.76),
-                    QtCore.QPointF(left + side * 0.82, top + side * 0.24)])
-
-        if button.text or button.value:
-            self._DrawText(painter, button)
-        painter.restore()
-
-    def _DrawText(self, painter, button):
-        """The label, and a switch's current value with a menu caret."""
-        font = QtGui.QFont()
-        font.setPixelSize(max(int(round(button.font_size)), 5))
-        font.setBold(button.bold)
-        box = QtCore.QRectF(2, 0, button.w - 4, button.h)
-        both = " ".join(x for x in (button.text, button.value) if x)
-        for _ in range(6):
-            if (QtGui.QFontMetricsF(font).horizontalAdvance(both)
-                    <= box.width() - (14.0 if button.value else 0.0)
-                    or font.pixelSize() <= 5):
-                break
-            font.setPixelSize(font.pixelSize() - 1)
-        painter.setFont(font)
-        align = {"left": QtCore.Qt.AlignLeft,
-                 "right": QtCore.Qt.AlignRight}.get(
-                     button.h_align, QtCore.Qt.AlignHCenter)
-        if button.checkbox:
-            box.setLeft(box.left() + min(button.h - 4.0, 11.0) + 5.0)
-            align = QtCore.Qt.AlignLeft
-
-        labelBox, valueBox, valueAlign, caretX = box, None, None, 0.0
-        if button.value:
-            metrics = QtGui.QFontMetricsF(font)
-            want = min(metrics.horizontalAdvance(button.value) + 14.0,
-                       box.width())
-            if not button.text:
-                want = box.width()
-                labelBox = None
-            if align == QtCore.Qt.AlignRight:
-                valueBox = QtCore.QRectF(box.left() + 12, box.top(),
-                                         want - 12, box.height())
-                valueAlign = QtCore.Qt.AlignLeft
-                caretX = box.left() + 5
-                if labelBox is not None:
-                    labelBox = QtCore.QRectF(box)
-                    labelBox.setLeft(box.left() + want)
-            else:
-                valueBox = QtCore.QRectF(box.right() - want, box.top(),
-                                         want - 12, box.height())
-                valueAlign = QtCore.Qt.AlignRight
-                caretX = box.right() - 7
-                if labelBox is not None:
-                    labelBox = QtCore.QRectF(box)
-                    labelBox.setRight(box.right() - want)
-
-        if button.text and labelBox is not None:
-            painter.setPen(QtGui.QColor(*button.text_color))
-            painter.drawText(labelBox, align | QtCore.Qt.AlignVCenter,
-                             button.text)
-        if button.value:
-            painter.setPen(QtGui.QColor(*button.value_color))
-            painter.drawText(valueBox, valueAlign | QtCore.Qt.AlignVCenter,
-                             button.value)
-            mid = box.center().y()
-            caret = QtGui.QPainterPath()
-            caret.moveTo(caretX - 3.2, mid - 1.6)
-            caret.lineTo(caretX + 3.2, mid - 1.6)
-            caret.lineTo(caretX, mid + 2.2)
-            caret.closeSubpath()
-            painter.setBrush(QtGui.QBrush(QtGui.QColor(*button.value_color)))
-            painter.setPen(QtCore.Qt.NoPen)
-            painter.drawPath(caret)
 
     # -- mouse -----------------------------------------------------------
 
@@ -617,15 +793,12 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
     # -- following the scene ---------------------------------------------
 
     def _Buttons(self):
-        return [b for picker in self._rig.pickers for b in picker.buttons] \
-            if self._rig else []
+        return self._rig.Buttons() if self._rig else []
 
     def _SyncSelection(self):
         if self._rig is None:
             return
-        selected = set(cmds.ls(selection=True, long=True) or [])
-        paths = [path for path, node in self._rig.controls.items()
-                 if node in selected]
+        paths = self._rig.SelectedPaths()
         for view in self._views:
             view.SetSelected(paths)
 
@@ -633,164 +806,23 @@ class PickerWindow(MayaQWidgetDockableMixin, QtWidgets.QWidget):
         """Shows each limb's live half, and each switch's current value."""
         if self._rig is None or not self.isVisible():
             return
-        modes = {}
-        changed = False
-        for button in self._Buttons():
-            if button.dial and button.dial not in modes:
-                plug = self._rig.DialPlug(button.dial)
-                value = cmds.getAttr(plug) if plug else None
-                if value is not None:
-                    if value >= 0.999:
-                        modes[button.dial] = "ik"
-                    elif value <= 0.001:
-                        modes[button.dial] = "fk"
-            target = button.attr_target
-            if target and button.live:
-                plug = self._rig.Plug(target["path"], target["attr"])
-                label = button.label_for(cmds.getAttr(plug))
-                if label and label != button.value:
-                    button.value = label
-                    changed = True
+        modes, changed = self._rig.Modes()
         for view in self._views:
             view.SetModes(modes)
             if changed:
                 view.update()
 
     def _SyncToggles(self):
-        group = self._rig.ControlsGroup() if self._rig else None
-        shown = bool(group) and bool(cmds.getAttr(group + ".visibility"))
-        for button in self._Buttons():
-            if button.command == "ctrl_vis":
-                button.checked = shown
+        if self._rig is not None:
+            self._rig.SyncToggles()
         for view in self._views:
             view.update()
-
-    # -- acting ----------------------------------------------------------
 
     def _OnPicked(self, buttons, mode):
         if self._rig is None:
             return
-        # A command or switch acts only on a plain click of one button, so
-        # a marquee across a limb never flips it or zeroes the rig.
-        if len(buttons) == 1 and mode == "replace":
-            button = buttons[0]
-            if button.command == "zero_ctrls":
-                self._ZeroControls()
-                return
-            if button.command == "ctrl_vis":
-                self._ToggleControls()
-                return
-            if button.attr_target:
-                self._Switch(button)
-                return
-        nodes = self._rig.Nodes(buttons)
-        if mode == "replace":
-            if nodes:
-                cmds.select(nodes, replace=True)
-            else:
-                cmds.select(clear=True)
-        elif mode == "remove":
-            if nodes:
-                cmds.select(nodes, deselect=True)
-        elif nodes:
-            cmds.select(nodes, toggle=True)
-
-    def _Switch(self, button):
-        """Sets a switch: IK/FK toggles, a space switch offers a menu."""
-        target = button.attr_target
-        plug = self._rig.Plug(target["path"], target["attr"])
-        if plug is None:
-            return
-        labels = target.get("enum") or []
-        if len(labels) > 2:
-            menu = QtWidgets.QMenu(self)
-            for name in labels:
-                action = menu.addAction(str(name))
-                action.setCheckable(True)
-                action.setChecked(name == button.value)
-            picked = menu.exec(QtGui.QCursor.pos())
-            if picked is None:
-                return
-            label = picked.text()
-            value = float(labels.index(label))
-            if target.get("invert"):
-                value = float(len(labels) - 1) - value
-        else:
-            value, label = button.next_value(cmds.getAttr(plug))
-            if value is None:
-                return
-        self._ApplySwitch(button, value, label)
-
-    def _ApplySwitch(self, button, value, label):
-        """Sets a switch to `value` as one undoable step, matched so
-        nothing moves."""
-        target = button.attr_target
-        plug = self._rig.Plug(target["path"], target["attr"])
-        # Matched: the limb or control keeps its place, and only what
-        # drives it changes. If matching fails the switch still happens.
-        plan, note = {plug: value}, ""
-        try:
-            solved = _matching.Plan(
-                self._rig, target["path"] + "." + target["attr"], value)
-            plan = {}
-            for attrPath, solvedValue in solved.items():
-                solvedPlug = self._rig.PlugForPath(attrPath)
-                if solvedPlug is not None:
-                    plan[solvedPlug] = solvedValue
-            plan[plug] = value
-            note = ", matched"
-        except Exception as error:
-            om.MGlobal.displayWarning(
-                "RigExec: switched without matching (%s)" % error)
-            note = ", not matched"
-        cmds.undoInfo(openChunk=True, chunkName="Switch " + label)
-        try:
-            autoKey = cmds.autoKeyframe(query=True, state=True)
-            for matchedPlug, matchedValue in plan.items():
-                if cmds.getAttr(matchedPlug, lock=True):
-                    continue
-                cmds.setAttr(matchedPlug, matchedValue)
-                if autoKey:
-                    cmds.setKeyframe(matchedPlug)
-        finally:
-            cmds.undoInfo(closeChunk=True)
-        button.value = label
+        self._rig.Pick(buttons, mode, self._status.setText, self)
         self._SyncModes()
-        self._status.setText("%s: %s%s" % (plug.rsplit("|", 1)[-1], label,
-                                            note))
-
-    def _ZeroControls(self):
-        """Returns the selected controls (or all of them) to the rig's
-        default pose."""
-        selected = set(cmds.ls(selection=True, long=True) or [])
-        controls = set(self._rig.controls.values())
-        chosen = (selected & controls) or controls
-        defaults = cmds.getAttr(self._rig.node + ".channelDefault") or []
-        cmds.undoInfo(openChunk=True, chunkName="Zero controls")
-        reset = 0
-        try:
-            for plug, index in self._rig.ChannelSources():
-                node = cmds.ls(plug.split(".", 1)[0], long=True)
-                if not node or node[0] not in chosen \
-                        or index >= len(defaults):
-                    continue
-                if cmds.getAttr(plug, lock=True):
-                    continue
-                cmds.setAttr(plug, defaults[index])
-                reset += 1
-        finally:
-            cmds.undoInfo(closeChunk=True)
-        self._SyncModes()
-        self._status.setText("Zeroed %d channels on %s." % (
-            reset, "the selected controls" if selected & controls
-            else "every control"))
-
-    def _ToggleControls(self):
-        group = self._rig.ControlsGroup()
-        if group is None:
-            return
-        cmds.setAttr(group + ".visibility",
-                     not cmds.getAttr(group + ".visibility"))
         self._SyncToggles()
 
     def _SelectAll(self):

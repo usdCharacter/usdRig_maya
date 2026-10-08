@@ -48,11 +48,13 @@ endif()
 add_library(rigExecMaya MODULE
     src/rigExecRigNode.cpp
     src/rigEvaluator.cpp
+    src/hoverOverlay.cpp
     src/frameCache.cpp)
 target_link_libraries(rigExecMaya PRIVATE rigExecMayaRuntime)
 target_include_directories(rigExecMaya PRIVATE "${MAYA_DEVKIT_LOCATION}/include")
 target_link_directories(rigExecMaya PRIVATE "${MAYA_DEVKIT_LOCATION}/lib")
-target_link_libraries(rigExecMaya PRIVATE OpenMaya OpenMayaAnim Foundation)
+target_link_libraries(rigExecMaya PRIVATE OpenMaya OpenMayaAnim OpenMayaRender
+                      OpenMayaUI Foundation)
 if (WIN32)
     target_compile_definitions(rigExecMaya PRIVATE NT_PLUGIN REQUIRE_IOSTREAM
                                _BOOL NOMINMAX)

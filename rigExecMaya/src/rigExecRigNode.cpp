@@ -17,6 +17,7 @@
 // set once by rigexec_maya.scene from the rig's export.
 
 #include "frameCache.h"
+#include "hoverOverlay.h"
 #include "rigEvaluator.h"
 
 #include <maya/MAngle.h>
@@ -865,6 +866,9 @@ initializePlugin(MObject plugin)
                                     RigExecFramesCommand::creator);
     }
     if (status) {
+        status = rigExecMaya::RegisterHoverOverlay(fn);
+    }
+    if (status) {
         gFillCallback = MTimerMessage::addTimerCallback(0.25f, OnFillTimer,
                                                         nullptr, &status);
     }
@@ -879,6 +883,7 @@ uninitializePlugin(MObject plugin)
         gFillCallback = 0;
     }
     MFnPlugin fn(plugin);
+    rigExecMaya::DeregisterHoverOverlay(fn);
     fn.deregisterCommand("rigExecFrames");
     fn.deregisterCommand("rigExecCache");
     return fn.deregisterNode(RigExecRigNode::id);

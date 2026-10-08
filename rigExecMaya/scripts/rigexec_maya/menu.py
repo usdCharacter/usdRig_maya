@@ -12,11 +12,34 @@ def Install():
     cmds.menu(_MENU, label="RigExec", parent=window, tearOff=True)
     cmds.menuItem(label="Load Rig...", command=lambda *_: LoadRigDialog())
     cmds.menuItem(label="Picker", command=lambda *_: ShowPicker())
+    cmds.menuItem(label="Hover Picker",
+                  annotation="Show or hide the picker over the viewport "
+                  "(bind RigExecToggleHoverPicker in the Hotkey Editor)",
+                  command=lambda *_: ToggleHoverPicker())
+    _InstallRuntimeCommand()
 
 
 def ShowPicker():
     from . import picker
     return picker.Show()
+
+
+def ToggleHoverPicker():
+    from . import hover
+    return hover.Toggle()
+
+
+def _InstallRuntimeCommand():
+    """RigExecToggleHoverPicker, for a hotkey of your choosing (Maya's own
+    P is Parent, so the hover picker doesn't take it)."""
+    name = "RigExecToggleHoverPicker"
+    if not cmds.runTimeCommand(name, exists=True):
+        cmds.runTimeCommand(
+            name, category="Custom Scripts.RigExec",
+            annotation="Show or hide the RigExec hover picker",
+            commandLanguage="python",
+            command="import rigexec_maya.menu; "
+                    "rigexec_maya.menu.ToggleHoverPicker()")
 
 
 def LoadRigDialog():

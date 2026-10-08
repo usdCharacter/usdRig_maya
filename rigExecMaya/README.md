@@ -143,6 +143,29 @@ kept on the `rigExecRig` node, so saved scenes keep it.
 The picker uses usdRig's picker rules and its IK/FK and space matching from
 the usdRig checkout, so it behaves the same as in usdview.
 
+### Hover picker
+
+**RigExec > Hover Picker** shows the picker's tabs right in the viewport, as
+floating buttons with no window around them. Anywhere that isn't a button
+still selects, box-selects, drags manipulators and moves the camera as
+usual. It shows in the viewport that has focus; choose it again to hide it.
+
+- Each tab hangs off a small round handle. Drag the handle to move the
+  tab, Shift-drag it to scale the tab, and double-click it to collapse or
+  expand the tab. Hover it to see the tab's name.
+- Click a button to select, with the same rules as the docked picker
+  (Shift toggles, Ctrl removes, Alt mirrors, switches match). Drag from a
+  button to box-select within the tab.
+- Middle-drag a tab left or right to fade it. The knob at the bottom right
+  fades every tab at once; double-click it for full opacity.
+- Maya's P is Parent, so the hover picker has no hotkey of its own. To give
+  it one, bind **RigExecToggleHoverPicker** (Custom Scripts > RigExec) in
+  the Hotkey Editor.
+
+The layout is saved per user, in the same place usdview keeps its hover
+picker layout, and never in the scene. The picker is drawn by Viewport 2.0
+through a `rigExecHoverPicker` locator, which loading it adds to the scene.
+
 ## Limits
 
 - Only TRS controls get Maya manipulators. The other avars are plain keyable
