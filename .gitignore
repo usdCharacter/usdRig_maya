@@ -44,3 +44,6 @@ build-rigexecmaya/
 
 # Exported rigs
 rigExecMaya/cache/
+
+# Documentation site
+site/

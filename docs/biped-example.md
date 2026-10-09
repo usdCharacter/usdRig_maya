@@ -3,7 +3,7 @@
 This walks through animating usdRig's biped character in Maya 2027 with the
 `rigExecMaya` plug-in. The rig stays a USD layer. Maya holds the controls and
 their animation, the rig runs inside Maya from a baked copy, and Maya shows
-the deformed meshes. See [rigExecMaya/README.md](../rigExecMaya/README.md) for
+the deformed meshes. See [How it works](how-it-works.md) for
 how the plug-in works.
 
 ## 1. Lay out the checkouts
@@ -89,10 +89,9 @@ Biped_stack_rigExec    the rigExecRig node that drives both
   panels. Click a button to select its controls, and use the switches to
   flip a limb between IK and FK or to change a control's space, without
   the limb or control moving. **RigExec > Hover Picker** puts the same
-  buttons right in the viewport. See "Picker" in the plug-in README.
+  buttons right in the viewport. See [Picker](picker.md) and [Hover picker](hover-picker.md).
 - **Playback**: frames are cached as they play. Background threads fill
-  in the rest of the playback range. See "Playback cache" in
-  the plug-in README.
+  in the rest of the playback range. See [Playback](playback.md).
 
 Saved Maya scenes reopen normally while the baked rig is still in the
 cache.
