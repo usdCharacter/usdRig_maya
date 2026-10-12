@@ -2,7 +2,7 @@
 
 A native, read-only OpenUSD `SdfFileFormat` plugin for Maya ASCII (`.ma`).
 It depends on this repository's `rigExecRigging` authoring library and schema,
-and produces an executable `RigExecRoot` plus native USD geometry and materials.
+and produces a `RigExecRoot` plus native USD geometry and materials.
 It does not require Maya, execute MEL/Python, or load Maya node plugins.
 
 This is a **supported-subset translator**, not a replacement for Maya's DG
@@ -10,7 +10,7 @@ evaluation. Inspect diagnostics before treating a production rig as complete.
 
 ## Build and load
 
-This sidecar is staged beside the usdRig checkout (`../usdMayaRig` next to
+This sidecar is staged beside the usdRig checkout (`../usdRig_maya` or `../usdMayaRig` next to
 `../usdRig`) and builds standalone against a RigExec install; the live
 usdRig tree carries no Maya sources. Two flavors, matching the main builds:
 
@@ -87,20 +87,39 @@ builds; it does not include or duplicate the rig engine's sources.
 | Maya data | USD result |
 | --- | --- |
 | Transform/joint DAG | Nested `RigExecControl` / `RigExecJoint` providers under `/Rig/Dag`, saved local matrices in `rest:space`; avars edit relative to that saved pose |
-| Rotation order, rotate axis, joint orient, pivots, offset-parent matrix | Incorporated into the saved local bind/rest matrix |
+| Rotation order, rotate axis, joint orient, pivots, offset-parent matrix | Maya channel composition in saved rest matrices and live affine providers |
+| Joint inverseScale / segmentScaleCompensate | Live inverse-scale channels applied after joint orientation; zero joint scales use Maya's nonsingular epsilon convention |
 | Direct translate/rotate/scale connections with identity local rest frames | Native avar channel connections |
 | Point, orient, scale, parent constraints | Native RigExec constraint movers, source weights, channel masks and offsets; dependency-ordered mover stack |
 | Polygon vertices, signed edges, faces | `UsdGeomMesh` under `/Rig/Geometry`, points in rig asset space, subdivision disabled |
 | Stored mesh vertex tweaks | Sparse `.pt` offsets applied to input vertices before skinning; animated/connected tweaks are not evaluated |
 | First UV set | Indexed, face-varying `primvars:st` |
-| Cached 3D NURBS curves | `UsdGeomNurbsCurves`, knots, CVs and rational weights |
+| Cached 3D NURBS controller shapes | Native `RigExecControl` custom guides (`guide:shape = custom`, local `guide:points` and `guide:curveVertexCounts`); original CVs/knots/weights retained in `maya:controlShapes` custom data |
+| Curves consumed as rig data | Linear/cubic `UsdGeomBasisCurves`; deformed, rational, periodic and high-degree curves retain native NURBS CVs/knots |
 | Open NURBS ribbon surfaces and uvPin | `UsdGeomNurbsPatch`, native linear skinning, rational surface position/tangent evaluation in `RigExecNurbsSurfacePin` |
+| Linear lofts from two-CV rails | Live rail transforms drive ribbon pins, with uniform or chord-length U parameters; intervening rebuildSurface fits are approximated by the input loft and diagnosed |
 | Rotate-plane / single-chain IK | Native `RigExecSingleChainIkConstraint`, pole targets, virtual terminal joints and preserved bone orientation |
 | Skin cluster | `RigExecSkinMover`, sparse Maya influence indices remapped to a dense palette, weights, normalization, envelope, linear or DQ skinning |
+| Multi-chain deformer history (`og[N]`/`ip[N]`) | Static shells resolve per element, never from a sibling chain; vertex-less mid-chain shapes continue through their own input |
 | Post-skin deltaMush | Native `RigExecDeltaMushMover`, explicit rest points, iterative smoothing, border pinning, distance weights, displacement and envelope |
-| `bindPreMatrix` and `geomMatrix` | Bind-frame proxy joints and geometry bind placement; constraints follow the live DAG pose |
+| Live local-origin blendShape targets | Native blend inputs reading target geometry after its own history; target DAG placement is removed before applying the receiver's geometry matrix |
+| Two-by-two-by-two global FFD | Native `RigExecMayaFfd` using the evaluated cage, base matrix, painted point weights and outside-lattice exclusion or extrapolation |
+| DAG-matrix cluster | Native affine influence and component weights; relative clusters compensate for the handle parent and geometry matrix |
+| Unsupported post-skin filters | Skin binding preserved; the filter is recorded on `maya:unsupportedPostSkinFilters` and diagnosed |
+| Procedural input with no stored vertices upstream | Mesh skipped with a diagnostic naming the blocker plug |
+| Unsubdivided three-sided polyDisc | Native triangle points, topology and UVs, including skinned attachment carriers |
+| `bindPreMatrix` and `geomMatrix` | Native affine skin matrices, including live inverse binds connected to moving attachment frames |
+| Serial skin history | All supported skin/filter operations apply to the same live geometry in source order; intermediate cached points do not replace the input |
+| Rotate pivots and local matrix/inverse-matrix inputs | Pivot-centered rig frames with compensating child/guide coordinates; native `RigExecMayaMatrixSpace` preserves affine placement |
+| Unconnected composeMatrix inputs | Constant TRS/shear matrices feeding offsetParentMatrix |
+| `blendColors`, multiply/divide, reverse, linear add/multiply, unit conversion | Native scalar expressions for connected transform channels and numeric custom attributes; unsupported inputs remain diagnosed |
+| `floatMath` add/subtract/multiply/divide, `plusMinusAverage` | Float-precision computations with sparse 1D/2D/3D input arrays; live connections retained and constant computations folded |
+| `condition`, remapValue constant/linear/smooth ramps | Native scalar comparisons and ramp expressions; connected deformer envelopes use a float expression and dynamic weight object |
+| `pointOnCurveInfo.position`, non-fraction open-curve `motionPath.allCoordinates`, `distanceBetween` | Native evaluated curve positions and distances between DAG world matrices; linear-skinned CVs and rotate pivots are respected |
+| Locator world positions, pairBlend translation | Native evaluated positions, including constraint-fed translation blends |
 | Lambert, Blinn, Phong, standardSurface, aiStandardSurface | Approximate `UsdPreviewSurface` material: base color, opacity, roughness, metallic |
-| File node directly driving base color | `UsdUVTexture` plus `UsdPrimvarReader_float2`; authored file assets and basic color space |
+| File node driving base color, roughness, metalness or normal | One `UsdUVTexture` per map (stable `Texture`/`Roughness`/`Metallic`/`Normal` roles) plus a shared `UsdPrimvarReader_float2`; authored file assets and basic color space |
+| Normal map routed through `bump2d` | Preserved as a `normal` connection; the bump evaluation is not executed and is diagnosed |
 | Shading-engine membership | Whole-mesh binding or face subsets from `objectGrpCompList` |
 | Implicit `lambert1` / `initialShadingGroup` | Default material and binding, including leading-colon names |
 | Maya ASCII references | Recursively parsed, namespaced nodes and dependencies; cycles fail explicitly |
@@ -124,7 +143,7 @@ approximations. Layer custom data includes `mayaRig:source`,
 `mayaRig:diagnostics`, `mayaRig:dependencies`, and `mayaRig:complete` (meaning
 there were no reported diagnostics, **not** a proof of Maya equivalence).
 
-`/Rig/Source/Nodes` retains each source node's type, name, ordered attribute
+`/Rig` custom data `maya:sourceNodes` retains each source node's type, name, ordered attribute
 assignments, data types and values. Connection endpoints and remaining commands
 are stored on `/Rig`; asset-bearing source attributes are also typed USD assets.
 Names use collision-free escaping, including Maya namespaces. Ambiguous short
@@ -134,9 +153,16 @@ the read rather than silently binding to the wrong node.
 Known limits:
 
 * No animation curves, expressions, arbitrary utility-node evaluation, spline IK,
-  blendshapes, lattice or connected tweak deformation, construction-history evaluation,
+  arbitrary blendshape/lattice or connected tweak deformation, arbitrary construction-history evaluation,
   custom Maya nodes, reference edits, DAG instancing, or Maya binary files.
   Their graph data is retained; untranslated nodes/connections are diagnosed.
+  Blendshape support currently requires connected live targets with local origin,
+  matching point counts and the full-weight target item. Saved target deltas,
+  inbetweens and other origins remain unsupported. FFD support requires a global
+  two-by-two-by-two cage without frozen/original geometry binding or partial
+  resolution. Higher lattice resolutions and local influence modes are unsupported.
+  Relative cluster support has focused translation/scale coverage; arbitrary
+  compensation matrices and fractional rotation weights remain unproven.
 * Skinning needs one output mesh and stored input geometry. Geometry connections
   are followed through `groupParts` and topology-preserving `deltaMush` history;
   the upstream skin binding, influence palette and geometry bind matrix survive
@@ -148,12 +174,23 @@ Known limits:
   Blended linear/DQ skinning
   is diagnosed rather than approximated. Maya-specific DQ scale behavior has
   not been validated against Maya.
-* Non-rigid rest matrices are preserved but diagnosed because RigExec
-  orthonormalizes rest frames. Parent-scale compensation and
-  `inheritsTransform=false` do not have full Maya-equivalent evaluation.
+* Connected compose/multiply/decompose-matrix graphs, quaternion utility graphs and
+  pairBlend rotations remain unsupported. Maya constraint weights resolve their
+  initial scalar connections; changing connected IK/FK weights at runtime needs
+  a live weight-table contract in usdRig. Local matrix reads from a source with
+  its own driven offsetParentMatrix have not been proven Maya-equivalent.
+  Enabled point/orient/parent constraints with zero initial source weights seed
+  their explicit Maya rest channels before geometry and frame providers are built.
+* Native connected frame providers currently force usdRig's baked evaluator to
+  fall back to dynamic evaluation. Large translated constraint graphs can be
+  slow; supporting those dependencies in the baked path requires usdRig work.
+  The Maya FFD plugin currently has no `.rigexec` binary encoder or playback
+  kernel; binary export rejects it rather than dropping the deformation.
 * Shader conversion approximates the listed surface inputs; procedural and
-  layered shading, normal maps, placement nodes and additional connections are
-  not evaluated. Extra UV/color sets are retained as source data with a
+  layered shading, subsurface, sheen, emission, placement nodes and additional
+  connections are not evaluated. A `bump2d` between a normal map and the
+  shader is preserved as a direct normal connection, not evaluated.
+  Extra UV/color sets are retained as source data with a
   diagnostic; polygon holes/legacy encodings fail explicitly. Authored split
   normals and edge smoothing are not currently translated.
 * Multi-source rotation/scale constraint interpolation is diagnosed as an
@@ -167,6 +204,10 @@ mesh topology/UVs/materials, sparse skin weights, namespaced references,
 relative textures, asset dependency discovery, cycle rejection and inert
 script preservation. The evaluator test moves a control through a constraint
 and bind proxies and checks the resulting weighted mesh vertices.
+Additional independent Maya fixtures check live blend targets, target-origin
+compensation, cluster/remap/tweak history, condition-driven envelopes, global
+FFD extrapolation, reflected constraint sources and joint scale compensation,
+including zero scale. These focused checks do not establish production-rig parity.
 
 Downloaded Autodesk example validation is reproducible with
 `tests/proofDownloadedExamples.py` and `tests/proofMayaReference.py`. The latter
@@ -215,3 +256,14 @@ Installed layout: add `lib/python/usdMayaRigUsdview` to those two paths.
 
 Format references: Autodesk's [Maya ASCII organization](https://download.autodesk.com/us/maya/2010help/files/Maya_ASCII_file_format_Organization_of_Maya_ASCII_files.htm)
 and [setAttr data encodings](https://help.autodesk.com/cloudhelp/ENU/MayaCRE-Tech-Docs/Commands/setAttr.html).
+
+Picker XML conversion is available with `tools/convert_mgpicker.py picker.mgpkr
+rig.usdc picker.usda` in the RigExec launcher environment. It writes native
+`RigExecPicker` pages and control relationships, copies panel background images
+to `pickerimages`, and authors `ui:backgroundImage` assets so USDZ includes them.
+Both usdview and the iPad Rig app display these images behind the buttons.
+Imported stages with picker pages open the Control Picker automatically.
+The iPad app consumes converted USD; it does not parse Maya ASCII. Its native
+build includes this sidecar's native pin, matrix, skin, channel and FFD callbacks
+when the sidecar is present. Run `tests/testPickerConversion.py` in the RigExec
+Python environment to check XML alpha and panel-coordinate conversion.

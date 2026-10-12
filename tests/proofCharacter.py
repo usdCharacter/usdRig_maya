@@ -10,7 +10,8 @@ Requires the built usdMayaRig plugin, rigexec Python module and numpy.
 import argparse, collections, hashlib, json, os, pathlib, re, sys, time, traceback
 import urllib.request
 
-repo=pathlib.Path(__file__).resolve().parents[3]
+sidecar=pathlib.Path(__file__).resolve().parents[1]
+repo=sidecar.parent/'usdRig'
 parser=argparse.ArgumentParser()
 parser.add_argument('--output',type=pathlib.Path,default=repo/'build/maya-character-proof')
 parser.add_argument('--download-only',action='store_true')
@@ -31,7 +32,7 @@ sys.path.insert(0,str(repo/'tests/python'))
 from rigexec_test_env import SetupPluginTest
 SetupPluginTest(repo/'build')
 from pxr import Plug,Usd
-Plug.Registry().RegisterPlugins(os.environ.get('USDMAYARIG_PLUGIN_RESOURCES',str(repo/'build/plugin/usdMayaRig/usd/usdMayaRig/resources')))
+Plug.Registry().RegisterPlugins(os.environ.get('USDMAYARIG_PLUGIN_RESOURCES',str(sidecar/'build/usd/usdMayaRig/resources')))
 Plug.Registry().RegisterPlugins(str(repo/'plugin/rigExecSchema/resources'))
 sys.path.insert(0,str(repo/'build/python'))
 import rigexec,numpy as np
@@ -50,6 +51,7 @@ s.GetRootLayer().Export(str(out/'rhino_imported.usda'))
 by_name={p.GetCustomDataByKey('maya:name'):p for p in s.Traverse() if p.GetCustomDataByKey('maya:name') and str(p.GetPath()).startswith('/Rig/Dag')}
 meshes={p.GetCustomDataByKey('maya:name'):p for p in s.Traverse() if p.IsA(UsdGeom.Mesh)}
 curves={p.GetCustomDataByKey('maya:name'):p for p in s.Traverse() if p.IsA(UsdGeom.NurbsCurves)}
+controlShapes={shape['name']:(control,shape) for control in by_name.values() for shape in (control.GetCustomDataByKey('maya:controlShapes') or {}).values()}
 overlay=Sdf.Layer.CreateAnonymous('character-proof.usda');s.GetSessionLayer().subLayerPaths.append(overlay.identifier);s.SetEditTarget(overlay)
 r=rigexec.Rig(s,'/Rig')
 try:
@@ -65,11 +67,21 @@ for label,expected in ref['poses'].items():
         item['valid']=pose.valid; item['evaluatorDiagnostics']=list(pose.diagnostics)
         moved=pose.moved_properties()
         for maya_name,wanted in expected.get('curves',{}).items():
-            prim=curves[maya_name];prop=str(prim.GetPath())+'.points'
-            points=np.array(moved[prop] if prop in moved else UsdGeom.NurbsCurves(prim).GetPointsAttr().Get(),dtype=float)
+            if maya_name in controlShapes:
+                control,shape=controlShapes[maya_name]
+                matrix=np.array(pose.control_frame(str(control.GetPath())).to_matrix4()).reshape(4,4)
+                shift=np.eye(4);shift[3,:3]=-np.array(control.GetCustomDataByKey('maya:rotatePivot') or (0,0,0))
+                matrix=shift@matrix
+                local=np.array(shape['points'],dtype=float)
+                points=(np.c_[local,np.ones(len(local))]@matrix)[:,:3]
+            else:
+                prim=curves[maya_name];prop=str(prim.GetPath())+'.points'
+                points=np.array(moved[prop] if prop in moved else UsdGeom.NurbsCurves(prim).GetPointsAttr().Get(),dtype=float)
             target=np.array(wanted['points'],dtype=float)
             owner=by_name[wanted['control']]
             frame=np.array(pose.control_frame(str(owner.GetPath())).to_matrix4()).reshape(4,4)
+            shift=np.eye(4);shift[3,:3]=-np.array(owner.GetCustomDataByKey('maya:rotatePivot') or (0,0,0))
+            frame=shift@frame
             matrix_error=float(abs(frame-np.array(wanted['matrix']).reshape(4,4)).max())
             error=float(np.linalg.norm(points-target,axis=1).max())
             item['curves'][maya_name]={'maxCvErrorCm':error,'maxControlMatrixError':matrix_error,'passed':error<=result['toleranceCm'] and matrix_error<=result['toleranceCm']}
@@ -102,4 +114,3 @@ for label,expected in ref['poses'].items():
 result['passed']=all(p['passed'] for p in result['poses'].values()) and len(result['poses'])==5
 (out/'comparison.json').write_text(json.dumps(result))
 sys.exit(0 if result['passed'] else 1)
-

@@ -10,9 +10,9 @@ else()
     set(_maya_tests_default ${RIGEXEC_BUILD_TESTS})
 endif()
 
-add_library(usdMayaRig SHARED fileFormat.cpp parser.cpp translator.cpp nativeNodes.cpp)
+add_library(usdMayaRig SHARED fileFormat.cpp parser.cpp translator.cpp nativeNodes.cpp nativeDeformers.cpp)
 target_compile_features(usdMayaRig PRIVATE cxx_std_17)
-target_link_libraries(usdMayaRig PRIVATE ${_maya_rigging} usdGeom usdShade ar plug)
+target_link_libraries(usdMayaRig PRIVATE ${_maya_rigging} usdGeom usdShade usdSkel ar plug)
 if(TARGET rigExec)
     target_link_libraries(usdMayaRig PRIVATE rigExec exec vdf)
 else()
@@ -25,12 +25,19 @@ if (MSVC)
 endif()
 set(_maya_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdMayaRig/resources")
 file(GENERATE OUTPUT "${_maya_resources}/plugInfo.json" CONTENT
-"{\"Plugins\":[{\"Type\":\"library\",\"Name\":\"usdMayaRig\",\"Root\":\"..\",\"LibraryPath\":\"$<TARGET_FILE:usdMayaRig>\",\"ResourcePath\":\"resources\",\"Info\":{\"Exec\":{\"Schemas\":{\"RigExecNurbsSurfacePin\":{}}},\"Types\":{\"RigExecNurbsSurfacePin\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecNurbsSurfacePin\",\"schemaKind\":\"concreteTyped\"},\"UsdMayaRigFileFormat\":{\"bases\":[\"SdfFileFormat\"],\"displayName\":\"Maya ASCII Rig\",\"extensions\":[\"ma\"],\"formatId\":\"mayaRig\",\"primary\":true,\"target\":\"usd\",\"supportsReading\":true,\"supportsWriting\":false,\"supportsEditing\":false}}}}]}")
+"{\"Plugins\":[{\"Type\":\"library\",\"Name\":\"usdMayaRig\",\"Root\":\"..\",\"LibraryPath\":\"$<TARGET_FILE:usdMayaRig>\",\"ResourcePath\":\"resources\",\"Info\":{\"RigExecMoverPlugin\":5,\"Exec\":{\"Schemas\":{\"RigExecMayaScalar\":{},\"RigExecMayaTranslation\":{},\"RigExecMayaCurvePoint\":{},\"RigExecNurbsSurfacePin\":{},\"RigExecMeshPin\":{},\"RigExecMayaMatrixSpace\":{},\"RigExecMayaSkinInfluence\":{}}},\"Types\":{\"RigExecMayaFfd\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaFfd\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaCurvePoint\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaCurvePoint\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaTranslation\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaTranslation\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaScalar\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaScalar\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaSkinInfluence\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaSkinInfluence\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaMatrixSpace\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaMatrixSpace\",\"schemaKind\":\"concreteTyped\"},\"RigExecMeshPin\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMeshPin\",\"schemaKind\":\"concreteTyped\"},\"RigExecNurbsSurfacePin\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecNurbsSurfacePin\",\"schemaKind\":\"concreteTyped\"},\"UsdMayaRigFileFormat\":{\"bases\":[\"SdfFileFormat\"],\"displayName\":\"Maya ASCII Rig\",\"extensions\":[\"ma\"],\"formatId\":\"mayaRig\",\"primary\":true,\"target\":\"usd\",\"supportsReading\":true,\"supportsWriting\":false,\"supportsEditing\":false}}}}]}")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/install/plugInfo.json" CONTENT
-"{\"Plugins\":[{\"Type\":\"library\",\"Name\":\"usdMayaRig\",\"Root\":\"..\",\"LibraryPath\":\"../../$<TARGET_FILE_NAME:usdMayaRig>\",\"ResourcePath\":\"resources\",\"Info\":{\"Exec\":{\"Schemas\":{\"RigExecNurbsSurfacePin\":{}}},\"Types\":{\"RigExecNurbsSurfacePin\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecNurbsSurfacePin\",\"schemaKind\":\"concreteTyped\"},\"UsdMayaRigFileFormat\":{\"bases\":[\"SdfFileFormat\"],\"displayName\":\"Maya ASCII Rig\",\"extensions\":[\"ma\"],\"formatId\":\"mayaRig\",\"primary\":true,\"target\":\"usd\",\"supportsReading\":true,\"supportsWriting\":false,\"supportsEditing\":false}}}}]}")
+"{\"Plugins\":[{\"Type\":\"library\",\"Name\":\"usdMayaRig\",\"Root\":\"..\",\"LibraryPath\":\"../../$<TARGET_FILE_NAME:usdMayaRig>\",\"ResourcePath\":\"resources\",\"Info\":{\"RigExecMoverPlugin\":5,\"Exec\":{\"Schemas\":{\"RigExecMayaScalar\":{},\"RigExecMayaTranslation\":{},\"RigExecMayaCurvePoint\":{},\"RigExecNurbsSurfacePin\":{},\"RigExecMeshPin\":{},\"RigExecMayaMatrixSpace\":{},\"RigExecMayaSkinInfluence\":{}}},\"Types\":{\"RigExecMayaFfd\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaFfd\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaCurvePoint\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaCurvePoint\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaTranslation\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaTranslation\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaScalar\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaScalar\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaSkinInfluence\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaSkinInfluence\",\"schemaKind\":\"concreteTyped\"},\"RigExecMayaMatrixSpace\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMayaMatrixSpace\",\"schemaKind\":\"concreteTyped\"},\"RigExecMeshPin\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecMeshPin\",\"schemaKind\":\"concreteTyped\"},\"RigExecNurbsSurfacePin\":{\"bases\":[\"UsdTyped\"],\"schemaIdentifier\":\"RigExecNurbsSurfacePin\",\"schemaKind\":\"concreteTyped\"},\"UsdMayaRigFileFormat\":{\"bases\":[\"SdfFileFormat\"],\"displayName\":\"Maya ASCII Rig\",\"extensions\":[\"ma\"],\"formatId\":\"mayaRig\",\"primary\":true,\"target\":\"usd\",\"supportsReading\":true,\"supportsWriting\":false,\"supportsEditing\":false}}}}]}")
 file(GENERATE OUTPUT "${_maya_resources}/generatedSchema.usda" CONTENT
 "#usda 1.0
+class RigExecMayaFfd \"RigExecMayaFfd\" {}
+class RigExecMayaScalar \"RigExecMayaScalar\" {}
+class RigExecMayaTranslation \"RigExecMayaTranslation\" {}
+class RigExecMayaCurvePoint \"RigExecMayaCurvePoint\" {}
 class RigExecNurbsSurfacePin \"RigExecNurbsSurfacePin\" {}
+class RigExecMeshPin \"RigExecMeshPin\" {}
+class RigExecMayaMatrixSpace \"RigExecMayaMatrixSpace\" {}
+class RigExecMayaSkinInfluence \"RigExecMayaSkinInfluence\" {}
 ")
 install(FILES "${_maya_resources}/generatedSchema.usda" DESTINATION lib/usd/usdMayaRig/resources)
 install(TARGETS usdMayaRig LIBRARY DESTINATION lib RUNTIME DESTINATION lib

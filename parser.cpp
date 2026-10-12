@@ -109,6 +109,15 @@ Scene Parse(const std::string &text) {
             }
             if (target >= 0) scene.nodes[target].attributes.push_back(std::move(a));
             else if (!a.values.empty()) scene.diagnostics.push_back("setAttr on external/default node: " + a.name);
+        } else if (w[0] == "addAttr" && current>=0) {
+            const auto name=Option(w,"-ln","-longName"),shortName=Option(w,"-sn","-shortName");
+            const auto type=Option(w,"-at","-attributeType"),value=Option(w,"-dv","-defaultValue");
+            static const std::set<std::string> numeric={"double","float","long","short","byte","bool","enum","doubleAngle","doubleLinear"};
+            if(!name.empty() && numeric.count(type)) {
+                scene.nodes[current].attributes.push_back({name,type,{value.empty()?"0":value}});
+                if(!shortName.empty() && shortName!=name)scene.nodes[current].attributes.push_back({shortName,type,{value.empty()?"0":value}});
+            }
+            std::string command;for(const auto &s:w) {if(!command.empty())command+=' ';command+=s;}scene.commands.push_back(command);
         } else if (w[0] == "connectAttr") {
             Words plugs;
             for (size_t i=1; i<w.size(); ++i) {

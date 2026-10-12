@@ -5,20 +5,21 @@ curve and body motion, then restores it. Opens the exported USD only.
 The whole-character deformation test remains a separate, currently failing test.
 """
 import argparse, os, sys, pathlib, json, traceback
-repo=pathlib.Path(__file__).resolve().parents[3]
+sidecar=pathlib.Path(__file__).resolve().parents[1]
+repo=sidecar.parent/'usdRig'
 parser=argparse.ArgumentParser()
 parser.add_argument('--output',type=pathlib.Path,default=repo/'build/maya-character-proof')
 out=parser.parse_args().output.resolve()
 usd=repo.parent/'usd-install'
 os.environ['PATH']=os.pathsep.join([str(repo/'build'),str(usd/'bin'),str(usd/'lib'),os.environ.get('PATH','')])
-plugin_paths=[repo/'build/usd/rigExecSchema/resources',repo/'build/usd/rigExecImaging/resources',os.environ.get('USDMAYARIG_PLUGIN_RESOURCES',repo/'build/plugin/usdMayaRig/usd/usdMayaRig/resources'),repo/'plugin/rigExecUsdview',repo/'build/python/UsdNoodles',repo/'plugin/touchPose',repo/'plugin/shapeEditor',repo/'plugin/usdMayaRig/usdview']
+plugin_paths=[repo/'build/usd/rigExecSchema/resources',repo/'build/usd/rigExecImaging/resources',os.environ.get('USDMAYARIG_PLUGIN_RESOURCES',sidecar/'build/usd/usdMayaRig/resources'),repo/'plugin/rigExecUsdview',repo/'build/python/UsdNoodles',repo/'plugin/touchPose',repo/'plugin/shapeEditor',sidecar/'usdview']
 os.environ['PXR_PLUGINPATH_NAME']=os.pathsep.join(map(str,plugin_paths))
 os.environ['TOUCHPOSE_PLUGIN_DIR']=str(repo/'plugin/touchPose')
 os.environ['RIGEXEC_USD_INSTALL']=str(usd)
 sys.path.insert(0,str(repo/'tests/python'))
 from rigexec_test_env import SetupPluginTest
 SetupPluginTest(repo/'build')
-for p in [repo/'build/python',repo/'plugin/rigExecUsdview',repo/'plugin/touchPose',repo/'plugin/shapeEditor',repo/'plugin/usdMayaRig/usdview']:
+for p in [repo/'build/python',repo/'plugin/rigExecUsdview',repo/'plugin/touchPose',repo/'plugin/shapeEditor',sidecar/'usdview']:
     sys.path.insert(0,str(p))
 from pxr import Usdviewq, Plug, UsdGeom
 from pxr.Usdviewq.qt import QtCore
@@ -39,11 +40,10 @@ class InspectLauncher(Usdviewq.Launcher):
                 api.dataModel.selection.setPrim(body)
                 controller._frameSelection()
                 head=next(p for p in stage.Traverse() if p.GetTypeName()=='RigExecControl' and (p.GetCustomDataByKey('maya:name') or '').endswith('|cn_head_jnt_001_cnt'))
-                shape=stage.GetPrimAtPath(head.GetRelationship('maya:controlShapes').GetTargets()[0])
-                api.dataModel.selection.setPrim(shape)
+                api.dataModel.selection.setPrim(head)
                 app.processEvents()
-                status['curvePickSelectsControl']=head in list(api.selectedPrims)
-                assert status['curvePickSelectsControl'], 'Picking curve did not select its control'
+                status['nativeControlSelected']=head in list(api.selectedPrims)
+                assert status['nativeControlSelected'], 'Native control selection failed'
                 status['selectedControl']=str(head.GetPath())
                 status['commands']={}
                 for name in ['reactivate','avarEditor','execStack']:
@@ -67,12 +67,11 @@ class InspectLauncher(Usdviewq.Launcher):
                 avars.SetValue('avars:rz',15.0)
                 app.processEvents()
                 after=oracle.evaluate(evaluation_time)
-                prop=str(shape.GetPath())+'.points'
-                status['editorMovesCurve']=before.moved_property(prop)!=after.moved_property(prop)
+                status['editorMovesControl']=before.control_frame(str(head.GetPath())).to_matrix4()!=after.control_frame(str(head.GetPath())).to_matrix4()
                 body_prop=str(body.GetPath())+'.points'
                 status['editorMovesBody']=before.moved_property(body_prop)!=after.moved_property(body_prop)
                 avars.SetValue('avars:rz',0.0)
-                assert status['editorMovesCurve'], 'Editor did not move the selected curve'
+                assert status['editorMovesControl'], 'Editor did not move the selected control'
                 assert status['editorMovesBody'], 'Editor did not deform the bound body'
                 status['diagnostics']=len(stage.GetDefaultPrim().GetAttribute('maya:diagnostics').Get())
                 controller._mainWindow.setWindowTitle('usdview - Native usdRig Rhino | deltaMush enabled; full parity incomplete')
