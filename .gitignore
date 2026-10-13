@@ -36,3 +36,14 @@ __pycache__/
 *.suo
 .DS_Store
 Thumbs.db
+
+# Maya plug-ins
+*.mll
+*.bundle
+build-rigexecmaya/
+
+# Exported rigs
+rigExecMaya/cache/
+
+# Documentation site
+site/

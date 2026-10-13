@@ -1,0 +1,69 @@
+# Builds the documentation site with MkDocs and publishes it to GitHub Pages.
+#
+# Publishing needs Pages switched on (Settings > Pages > Source: GitHub
+# Actions). Until it is, the site is still built and kept as the run's
+# "docs-site" artifact, and the deploy is skipped with a notice rather than
+# failing the run.
+name: Docs
+
+on:
+  push:
+    branches: [main, biped_example]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      pages: ${{ steps.pages.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r docs/requirements.txt
+      - run: mkdocs build --strict
+      - name: Keep the built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: site
+      - name: Check whether GitHub Pages is on
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/pages" > /dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Docs not published::GitHub Pages is off for this repository, so the site was built (see the docs-site artifact) but not published. A repository admin can turn it on under Settings > Pages > Source: GitHub Actions."
+          fi
+      - if: steps.pages.outputs.enabled == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.pages == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

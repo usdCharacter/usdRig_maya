@@ -1,5 +1,18 @@
 # usdMayaRig
 
+> This sidecar also carries **`rigExecMaya/`**, the Maya 2027 plug-in that
+> animates a RigExec rig inside Maya (the `rigExecRig` node, playing a rig
+> baked by `../usdRig`). Build it with `build_rigexecmaya.bat` and
+> start Maya with `launch_maya.bat [<rig.usda>]`.
+>
+> **To set up and run the biped example, see
+> [docs/biped-example.md](docs/biped-example.md).** How the plug-in works:
+> [rigExecMaya/README.md](rigExecMaya/README.md).
+>
+> The plug-in's full documentation is the MkDocs site in `docs/`, published
+> to GitHub Pages. To preview it locally:
+> `pip install -r docs/requirements.txt`, then `mkdocs serve`.
+
 A native, read-only OpenUSD `SdfFileFormat` plugin for Maya ASCII (`.ma`).
 It depends on this repository's `rigExecRigging` authoring library and schema,
 and produces a `RigExecRoot` plus native USD geometry and materials.
