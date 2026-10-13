@@ -21,8 +21,10 @@ permissions:
   pages: write
   id-token: write
 
+# A newer push replaces an older run on the same branch only; a run on one
+# branch never cancels another's.
 concurrency:
-  group: pages
+  group: docs-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -62,6 +64,10 @@ jobs:
     needs: build
     if: needs.build.outputs.pages == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # One deploy at a time, and none cut off halfway.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
