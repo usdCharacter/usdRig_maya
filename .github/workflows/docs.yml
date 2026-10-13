@@ -1,10 +1,12 @@
 # Builds the documentation site with MkDocs and publishes it to GitHub Pages.
 #
-# The site publishes from main. On other branches it is only built, which
-# catches broken pages and links before they merge; the run's "docs-site"
-# artifact holds the result. Publishing also needs Pages switched on
-# (Settings > Pages > Source: GitHub Actions); while it is off, the deploy
-# is skipped with a notice rather than failing the run.
+# Every run builds the site, which catches broken pages and links; the run's
+# "docs-site" artifact holds the result.
+#
+# Publishing is off for now. To turn it on, set the repository variable
+# DOCS_PUBLISH to "true" (Settings > Secrets and variables > Actions >
+# Variables); the site then publishes from main. GitHub Pages also has to be
+# available: on a free organization it only publishes public repositories.
 name: Docs
 
 on:
@@ -44,25 +46,23 @@ jobs:
         with:
           name: docs-site
           path: site
-      - name: Check whether GitHub Pages is on
+      - name: Check whether to publish
         id: pages
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          if gh api "repos/${{ github.repository }}/pages" > /dev/null 2>&1; then
+          if [ "${{ vars.DOCS_PUBLISH }}" = "true" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Docs not published::GitHub Pages is off for this repository, so the site was built (see the docs-site artifact) but not published. A repository admin can turn it on under Settings > Pages > Source: GitHub Actions."
+            echo "::notice title=Docs built, not published::The site was built (see the docs-site artifact). It publishes from main when the DOCS_PUBLISH repository variable is true."
           fi
-      - if: steps.pages.outputs.enabled == 'true' && github.ref == 'refs/heads/main'
+      - if: steps.pages.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
     needs: build
-    if: needs.build.outputs.pages == 'true' && github.ref == 'refs/heads/main'
+    if: needs.build.outputs.pages == 'true'
     runs-on: ubuntu-latest
     # One deploy at a time, and none cut off halfway.
     concurrency:
