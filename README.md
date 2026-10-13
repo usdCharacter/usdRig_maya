@@ -9,8 +9,9 @@
 > [docs/biped-example.md](docs/biped-example.md).** How the plug-in works:
 > [rigExecMaya/README.md](rigExecMaya/README.md).
 >
-> The plug-in's full documentation is the MkDocs site in `docs/`, published
-> to GitHub Pages. To preview it locally:
+> The plug-in's full documentation is at
+> **https://usdcharacter.github.io/usdRig_maya/**, built with MkDocs from
+> `docs/`. To preview it locally:
 > `pip install -r docs/requirements.txt`, then `mkdocs serve`.
 
 A native, read-only OpenUSD `SdfFileFormat` plugin for Maya ASCII (`.ma`).

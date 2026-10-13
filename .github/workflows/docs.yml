@@ -1,9 +1,10 @@
 # Builds the documentation site with MkDocs and publishes it to GitHub Pages.
 #
-# Publishing needs Pages switched on (Settings > Pages > Source: GitHub
-# Actions). Until it is, the site is still built and kept as the run's
-# "docs-site" artifact, and the deploy is skipped with a notice rather than
-# failing the run.
+# The site publishes from main. On other branches it is only built, which
+# catches broken pages and links before they merge; the run's "docs-site"
+# artifact holds the result. Publishing also needs Pages switched on
+# (Settings > Pages > Source: GitHub Actions); while it is off, the deploy
+# is skipped with a notice rather than failing the run.
 name: Docs
 
 on:
@@ -52,14 +53,14 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Docs not published::GitHub Pages is off for this repository, so the site was built (see the docs-site artifact) but not published. A repository admin can turn it on under Settings > Pages > Source: GitHub Actions."
           fi
-      - if: steps.pages.outputs.enabled == 'true'
+      - if: steps.pages.outputs.enabled == 'true' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
     needs: build
-    if: needs.build.outputs.pages == 'true'
+    if: needs.build.outputs.pages == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

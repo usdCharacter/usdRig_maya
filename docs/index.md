@@ -1,6 +1,6 @@
 # RigExec for Maya
 
-Animate a [RigExec](https://github.com/n-burk/usdRig) rig in Maya 2027. The
+Animate a [RigExec](https://github.com/usdCharacter/usdRig) rig in Maya 2027. The
 rig stays a USD layer, and nothing is written back to it: Maya holds the
 controls and their animation, the rig runs inside Maya, and Maya shows the
 deformed meshes.

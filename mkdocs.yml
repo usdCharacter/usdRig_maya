@@ -1,6 +1,7 @@
 site_name: RigExec for Maya
 site_description: Animate RigExec rigs in Maya 2027.
-repo_url: https://github.com/n-burk/usdRig_maya
+site_url: https://usdcharacter.github.io/usdRig_maya/
+repo_url: https://github.com/usdCharacter/usdRig_maya
 repo_name: usdRig_maya
 edit_uri: ""
 docs_dir: docs
