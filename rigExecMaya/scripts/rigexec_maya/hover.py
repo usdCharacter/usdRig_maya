@@ -23,7 +23,8 @@ drags a manipulator or moves the camera as usual.
 A port of usdRig's hover picker (plugin/rigExecUsdview/pickerHoverUI.py),
 whose layout and gesture rules (pickerHoverModel.py) it loads from the
 usdRig checkout. The layout is saved per user, in the same place usdview
-keeps it, and never in the scene.
+keeps it, and never in the scene. Each tab keeps to the viewport corner it
+was put down nearest, so it follows that corner as the viewport resizes.
 
 Maya's viewport is a native window that a translucent Qt widget can't sit
 over, so the picker is painted into an image and drawn by Viewport 2.0
@@ -226,12 +227,28 @@ class HoverPicker(QtCore.QObject):
         self._layout.Ensure([t.key for t in tabs], fits)
         if len(self._layout.tabs) != before:
             _SaveLayout(self._layout)
+        self._Place()
         if self._rigs:
             _EnsureLocator()
         for rig in self._rigs:
             rig.SyncToggles()
         self._modes = self._Modes()
         self._OnSelectionChanged()
+
+    def _Place(self):
+        """Puts every tab where its saved corner says for the viewport's
+        size now, kept on screen (pickerHoverModel.TabLayout.Place)."""
+        width = float(self._widget.width())
+        height = float(self._widget.height())
+        if width <= 0.0 or height <= 0.0:
+            return
+        sizes = {}
+        for tab in self._tabs:
+            layout = self._layout.Tab(tab.key)
+            if layout is not None:
+                sizes[tab.key] = (tab.cw * layout.scale,
+                                  tab.ch * layout.scale)
+        self._layout.Place(width, height, sizes)
 
     def _Modes(self):
         modes = {}
@@ -464,6 +481,8 @@ class HoverPicker(QtCore.QObject):
     def _Event(self, event):
         kind = event.type()
         if kind in (QtCore.QEvent.Resize, QtCore.QEvent.Show):
+            # The tabs follow their corners as the viewport resizes.
+            self._Place()
             QtCore.QTimer.singleShot(0, self.Render)
             return False
         if kind in (QtCore.QEvent.MouseButtonPress,
@@ -511,6 +530,7 @@ class HoverPicker(QtCore.QObject):
             if what == "handle":
                 layout = self._layout.Tab(tab.key)
                 layout.collapsed = not layout.collapsed
+                self._Place()
                 _SaveLayout(self._layout)
                 self.Render()
                 return True
@@ -576,13 +596,19 @@ class HoverPicker(QtCore.QObject):
                                point[0] - gesture["start"][0])
         elif kind == "move":
             last = gesture["last"]
-            self._layout.Tab(gesture["tab"].key).Moved(point[0] - last[0],
-                                                       point[1] - last[1])
+            layout = self._layout.Tab(gesture["tab"].key)
+            layout.Moved(point[0] - last[0], point[1] - last[1])
+            # Saved against whichever corner it is now nearest, and kept on
+            # screen while it is dragged.
+            layout.Anchor(float(self._widget.width()),
+                          float(self._widget.height()))
+            self._Place()
             gesture["last"] = point
         elif kind == "scale":
             start = gesture["start"]
             self._layout.Tab(gesture["tab"].key).Scaled(
                 gesture["scale"], point[0] - start[0], point[1] - start[1])
+            self._Place()
         elif kind == "fade":
             self._layout.Tab(gesture["tab"].key).Faded(
                 gesture["opacity"], point[0] - gesture["start"][0])
