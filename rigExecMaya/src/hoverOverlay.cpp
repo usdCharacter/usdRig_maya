@@ -69,7 +69,7 @@ public:
     bool isBounded() const override { return false; }
 };
 
-const MTypeId HoverPickerLocator::id(0x0007F2A2);
+const MTypeId HoverPickerLocator::id(0x13a18a);
 
 // What one draw needs: the panel being drawn and its viewport size.
 class HoverDrawData : public MUserData

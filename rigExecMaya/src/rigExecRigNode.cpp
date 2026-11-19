@@ -158,7 +158,7 @@ private:
     bool _needsFill = false;
 };
 
-const MTypeId RigExecRigNode::id(0x0007F2A1);
+const MTypeId RigExecRigNode::id(0x13a189);
 MObject RigExecRigNode::aStagePath, RigExecRigNode::aRigPath,
     RigExecRigNode::aTime, RigExecRigNode::aInLinear,
     RigExecRigNode::aInAngle, RigExecRigNode::aInMesh,
