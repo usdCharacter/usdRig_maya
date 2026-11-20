@@ -86,15 +86,23 @@ class Rig(object):
         self.pickers = []
         self.controls = {}          # rig prim path -> Maya control
         self.controlInfo = {}       # rig prim path -> rotation order, sign
+        self.controlPaths = []      # control index -> rig prim path
         self.limbs = []
         self.spaces = {}
+        self.touch = []             # TouchPose layers (scene._StoreRigData)
         if not cmds.attributeQuery("rigData", node=node, exists=True):
             return
         data = json.loads(cmds.getAttr(node + ".rigData") or "{}")
-        self.limbs = data.get("limbs") or []
-        self.spaces = data.get("spaces") or {}
+        # Scenes saved before matching moved into the rig carry limbs
+        # without their match constraint; they switch unmatched.
+        self.limbs = [l for l in data.get("limbs") or [] if "match" in l]
+        self.spaces = {attr: (space if isinstance(space, dict)
+                              else {"control": space, "writable": []})
+                       for attr, space in (data.get("spaces") or {}).items()}
+        self.touch = data.get("touch") or []
         for index, info in enumerate(data.get("controls") or []):
             path = info["path"]
+            self.controlPaths.append(path)
             self.controlInfo[path] = info
             nodes = cmds.listConnections(
                 "%s.outControlMatrix[%d]" % (node, index),
@@ -131,6 +139,78 @@ class Rig(object):
     @staticmethod
     def Get(plug):
         return cmds.getAttr(plug)
+
+    def Sign(self, attrPath):
+        """-1 when `<prim path>.<attribute>` is a mirrored rotation: the
+        rig turns it by minus its value, so Maya's channel holds the value
+        times -1 and the manipulator turns the control the way it is
+        dragged."""
+        primPath, _, attr = attrPath.rpartition(".")
+        axis = ("avars:rx", "avars:ry", "avars:rz").index(attr) \
+            if attr in ("avars:rx", "avars:ry", "avars:rz") else None
+        if axis is None:
+            return 1.0
+        sign = (self.controlInfo.get(primPath) or {}).get("rotationSign")
+        return -1.0 if sign and float(sign[axis]) < 0.0 else 1.0
+
+    def PathOf(self, node):
+        """The rig path of a Maya control, or None."""
+        node = (cmds.ls(node, long=True) or [None])[0]
+        for path, control in self.controls.items():
+            if control == node:
+                return path
+        return None
+
+    def Write(self, plan, label):
+        """Sets `plan` ({attribute path: value}) as one undo step, keying
+        each value when auto key is on. Returns how many were set."""
+        plugs = {}
+        for attrPath, value in plan.items():
+            plug = self.PlugForPath(attrPath)
+            if plug is not None:
+                plugs[plug] = value * self.Sign(attrPath)
+        cmds.undoInfo(openChunk=True, chunkName=label)
+        written = 0
+        try:
+            autoKey = cmds.autoKeyframe(query=True, state=True)
+            for plug, value in plugs.items():
+                if cmds.getAttr(plug, lock=True):
+                    continue
+                cmds.setAttr(plug, value)
+                if autoKey:
+                    cmds.setKeyframe(plug)
+                written += 1
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        return written
+
+    def SwitchLimb(self, limb, toIk=None):
+        """Switches `limb` to `toIk` (default: the half not driving),
+        matched, as one undo step. Returns "IK" or "FK", or None when the
+        rig published no match (nothing then changes)."""
+        if toIk is None:
+            toIk = not _matching.IsIk(self, limb)
+        try:
+            plan = _matching.LimbPlan(self, limb, toIk)
+        except Exception as error:
+            om.MGlobal.displayWarning(
+                "RigExec: could not match %s (%s)"
+                % (_matching.LimbLabel(limb), error))
+            return None
+        self.Write(plan, "Match %s to %s" % (_matching.LimbLabel(limb),
+                                             "IK" if toIk else "FK"))
+        return "IK" if toIk else "FK"
+
+    def SwitchSpace(self, attrPath, value, label=None):
+        """Sets the space switch `attrPath` to `value`, matched, as one undo
+        step. Unmatched (with a warning) when the rig published no match."""
+        try:
+            plan = _matching.Plan(self, attrPath, value)
+        except Exception as error:
+            om.MGlobal.displayWarning(
+                "RigExec: switched without matching (%s)" % error)
+            plan = {attrPath: float(value)}
+        self.Write(plan, "Switch space" + (" to " + label if label else ""))
 
     def DialPlug(self, dial):
         """The plug for a dial, given as `<prim path>.<attribute>`."""
@@ -275,32 +355,17 @@ class Rig(object):
         plug = self.Plug(target["path"], target["attr"])
         # Matched: the limb or control keeps its place, and only what
         # drives it changes. If matching fails the switch still happens.
-        plan, note = {plug: value}, ""
+        attrPath = target["path"] + "." + target["attr"]
+        plan, note = {attrPath: value}, ""
         try:
-            solved = _matching.Plan(
-                self, target["path"] + "." + target["attr"], value)
-            plan = {}
-            for attrPath, solvedValue in solved.items():
-                solvedPlug = self.PlugForPath(attrPath)
-                if solvedPlug is not None:
-                    plan[solvedPlug] = solvedValue
-            plan[plug] = value
+            plan = _matching.Plan(self, attrPath, value)
+            plan[attrPath] = value
             note = ", matched"
         except Exception as error:
             om.MGlobal.displayWarning(
                 "RigExec: switched without matching (%s)" % error)
             note = ", not matched"
-        cmds.undoInfo(openChunk=True, chunkName="Switch " + label)
-        try:
-            autoKey = cmds.autoKeyframe(query=True, state=True)
-            for matchedPlug, matchedValue in plan.items():
-                if cmds.getAttr(matchedPlug, lock=True):
-                    continue
-                cmds.setAttr(matchedPlug, matchedValue)
-                if autoKey:
-                    cmds.setKeyframe(matchedPlug)
-        finally:
-            cmds.undoInfo(closeChunk=True)
+        self.Write(plan, "Switch " + label)
         button.value = label
         self.Modes()
         status("%s: %s%s" % (plug.rsplit("|", 1)[-1], label,
@@ -314,6 +379,7 @@ class Rig(object):
         controls = set(self.controls.values())
         chosen = (selected & controls) or controls
         defaults = cmds.getAttr(self.node + ".channelDefault") or []
+        signs = cmds.getAttr(self.node + ".channelSign") or []
         cmds.undoInfo(openChunk=True, chunkName="Zero controls")
         reset = 0
         try:
@@ -324,7 +390,8 @@ class Rig(object):
                     continue
                 if cmds.getAttr(plug, lock=True):
                     continue
-                cmds.setAttr(plug, defaults[index])
+                cmds.setAttr(plug, defaults[index] *
+                             (signs[index] if index < len(signs) else 1.0))
                 reset += 1
         finally:
             cmds.undoInfo(closeChunk=True)

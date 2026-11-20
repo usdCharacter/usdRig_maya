@@ -8,10 +8,10 @@ Runs once per load, under the Python that owns the rig's USD build (OpenUSD
     python rigexec_maya_export.py <stage.usda> <out.rigexec> <out.json>
                                   [<rig prim path>]
 
-The .rigexec is a poseable bake (rigExecBake --poseable): the plug-in poses
+The .rigexec is usdRig's bake of the rig (rigExecBake): the plug-in poses
 it with Maya's channel values, in Maya's own process and without USD. The
 JSON describes the controls, channels, meshes, materials, control picker,
-IK/FK limbs (with their rest offsets, measured here) and space switches.
+IK/FK limbs, space switches and TouchPose regions.
 """
 
 import json
@@ -49,10 +49,7 @@ class Exporter:
         self.rigPath = Sdf.Path(str(rigPath))
         self.rig = rigexec.Rig(self.stage, str(self.rigPath))
         self.rig.compile()
-        # Animation, not rigging: the baked program answers exactly what the
-        # dynamic path does, about three times faster on the biped, and the
-        # per-point weight fields only feed a weight-painting overlay.
-        self.rig.evaluation_mode = "baked"
+        # The per-point weight fields only feed a weight-painting overlay.
         self.rig.publish_weight_fields = False
         self.time = Usd.TimeCode(BAKE_FRAME)
         assetRoot = self.stage.GetPrimAtPath(self.rigPath.GetParentPath())
@@ -115,6 +112,26 @@ class Exporter:
                     "default": float(value) if value is not None else 0.0,
                 })
 
+        # The eyes: each surface projector publishes its eye's frame, and its
+        # dials, as matrix primvars on the mesh it moves.
+        projectors = {}
+        for prim in self.stage.Traverse():
+            if prim.GetTypeName() != "RigExecSurfaceProjector":
+                continue
+            frame = prim.GetAttribute("rigExec:shaderPrimvar")
+            frame = frame.Get() if frame else None
+            if not frame:
+                continue
+            dials = prim.GetAttribute("rigExec:shaderDialPrimvar")
+            dials = dials.Get() if dials else None
+            for target in prim.GetRelationship("rigExec:moves").GetTargets():
+                mesh = str(target.GetPrimPath())
+                projectors[mesh] = {
+                    "projector": "%s.primvars:%s" % (mesh, frame),
+                    "dials": "%s.primvars:%s" % (mesh, dials) if dials
+                    else None,
+                }
+
         self.meshes = []
         cache = UsdGeom.XformCache(self.time)
         for prim in self.stage.Traverse():
@@ -149,6 +166,8 @@ class Exporter:
             entry["provider"] = provider or ""
             entry["local"] = _Matrix(local) if local is not None else None
             entry["world"] = _Matrix(cache.GetLocalToWorldTransform(prim))
+            if str(prim.GetPath()) in projectors:
+                entry["eyeProjector"] = projectors[str(prim.GetPath())]
             self.meshes.append(entry)
         self.written = written
 
@@ -220,6 +239,26 @@ class Exporter:
                 "opacity": float(get("opacity", 1.0)),
                 "ior": float(get("ior", 1.5)),
             }
+        elif source and source.GetImplementationSource() == "sourceAsset":
+            # A glslfx shader Maya can't run. The procedural eye is the one
+            # the biped uses; its inputs are kept so Maya builds the same
+            # iris and pupil from them (scene._EyeShadingGroup).
+            asset = source.GetSourceAsset("glslfx")
+            assetPath = asset.path if asset else ""
+            if os.path.basename(assetPath).startswith("sbe_eye"):
+                inputs = {i.GetBaseName(): i.Get()
+                          for i in source.GetInputs()}
+                surface = {"eye": {k: float(v) for k, v in inputs.items()
+                                   if isinstance(v, (int, float))
+                                   and not isinstance(v, bool)},
+                           "eyeColors": {}, "eyeTextures": {}}
+                for name, value in inputs.items():
+                    if isinstance(value, (Gf.Vec3f, Gf.Vec3d)):
+                        surface["eyeColors"][name] = [float(c) for c in value]
+                    elif isinstance(value, Sdf.AssetPath):
+                        resolved = value.resolvedPath or value.path
+                        if resolved:
+                            surface["eyeTextures"][name] = resolved
         return {"name": material.GetPrim().GetName(), "surface": surface,
                 "faces": faces}
 
@@ -269,7 +308,98 @@ class Exporter:
             "pickers": self.Pickers(),
             "limbs": self.Limbs(),
             "spaces": self.Spaces(),
+            "touch": self.TouchRegions(),
         }
+
+    # -- TouchPose ---------------------------------------------------------
+
+    def TouchRegions(self):
+        """The rig's TouchPose layers: per layer, the mesh it paints (by
+        index into `meshes`), its regions (faces and the control each one
+        selects, by index into `controls`) and the colours the three
+        highlight states take. The rules are usdRig's touchPoseModel:
+        typed properties first, the older custom touchpose:* ones as the
+        fallback, and a region that selects no exported control dropped."""
+        meshIndex = {m["path"]: i for i, m in enumerate(self.meshes)}
+        controlIndex = {c["path"]: i for i, c in enumerate(self.controls)}
+
+        def value(prim, typed, custom):
+            for name in (typed, custom):
+                if not name:
+                    continue
+                attr = prim.GetAttribute(name)
+                got = attr.Get() if attr and attr.IsValid() else None
+                if got is not None and (not hasattr(got, "__len__")
+                                        or len(got)):
+                    return got
+            return None
+
+        def targets(prim, typed, custom):
+            for name in (typed, custom):
+                if not name:
+                    continue
+                rel = prim.GetRelationship(name)
+                found = rel.GetTargets() if rel else []
+                if found:
+                    return [str(t) for t in found]
+            return []
+
+        def color(c, fallback):
+            return [float(x) for x in c] if c is not None else list(fallback)
+
+        layers = []
+        for scope in self.stage.Traverse():
+            if scope.GetTypeName() != "RigExecTouchRegions":
+                continue
+            meshPath = (targets(scope, "rigExec:touch:mesh", "") or
+                        [str(value(scope, "", "touchpose:mesh") or "")])[0]
+            if meshPath not in meshIndex:
+                continue
+            regions = []
+            for child in scope.GetChildren():
+                if child.GetTypeName() != "RigExecTouchRegion" and \
+                        not child.HasAttribute("touchpose:faces"):
+                    continue
+                control = targets(child, "rigExec:touch:control",
+                                  "touchpose:control")
+                if not control or control[0] not in controlIndex:
+                    continue
+                faces = value(child, "rigExec:touch:faces", "touchpose:faces")
+                hilight = child.GetAttribute("touchpose:hilight")
+                hilight = hilight.Get() if hilight and hilight.IsValid() \
+                    else 0
+                regions.append({
+                    "name": child.GetName(),
+                    "control": controlIndex[control[0]],
+                    "faces": [int(f) for f in (faces or [])],
+                    "color": color(child.GetAttribute("touchpose:color").Get()
+                                   if child.HasAttribute("touchpose:color")
+                                   else None, (1.0, 0.6, 0.0)),
+                    "hilight": int(hilight or 0),
+                })
+            if not regions:
+                continue
+            order = scope.GetAttribute("rigExec:touch:layerOrder")
+            order = order.Get() if order and order.IsValid() else 0
+            name = value(scope, "rigExec:touch:layerName", "")
+            palette = value(scope, "rigExec:touch:palette",
+                            "touchpose:palette")
+            alpha = value(scope, "rigExec:touch:alpha", "touchpose:alpha")
+            layers.append({
+                "name": str(name) if name else scope.GetName(),
+                "order": int(order or 0),
+                "mesh": meshIndex[meshPath],
+                "regions": regions,
+                "palette": [color(c, (1, 1, 1)) for c in (palette or [])],
+                "alpha": float(alpha) if alpha is not None else 1.0,
+                "leadColor": color(value(scope, "", "touchpose:leadColor"),
+                                   (0.054, 0.420, 0.187)),
+                "selectedColor": color(
+                    value(scope, "", "touchpose:selectedColor"),
+                    (0.277, 0.277, 0.277)),
+            })
+        layers.sort(key=lambda l: (l["order"], l["name"]))
+        return layers
 
     def Pickers(self):
         """The rig's control pickers, as the records usdRig's picker model
@@ -314,58 +444,69 @@ class Exporter:
 
     # -- switching without moving ---------------------------------------
 
-    def _Evaluate(self, overrides, time):
-        """A pose with `overrides` ({attribute path: value}) applied, for
-        usdRig's matching code."""
-        self.rig.set_interactive_overrides(
-            [(str(p.GetPrimPath()), p.name, float(v))
-             for p, v in overrides.items()])
-        try:
-            return self.rig.evaluate(BAKE_FRAME)
-        finally:
-            self.rig.clear_interactive_overrides()
-
     def Limbs(self):
-        """Every IK/FK limb, found and measured by usdRig's own matching
-        code: its controls and joints, and the offsets between them at
-        rest that a matched switch keeps."""
+        """Every IK/FK limb, found by usdRig's own matching code. The rig
+        publishes the values a matched switch writes (its match
+        constraint's outputs:ikValues and outputs:fkValues); this names
+        the channels they land on, and which of them a switch may write."""
         try:
             import ikfkMatch
         except ImportError:
             return []
+
+        def path(p):
+            return str(p) if p is not None else ""
+
         limbs = []
         for limb in ikfkMatch.FindLimbs(self.stage):
             if limb.rigRoot != self.rigPath:
                 continue
-            rest = ikfkMatch.MeasureRest(limb, self.stage, self._Evaluate,
-                                         self.time)
             limbs.append({
+                "match": str(limb.match),
                 "switch": str(limb.switchPath),
                 "ikValue": float(limb.ikValue),
-                "joints": [str(p) for p in limb.joints],
                 "fkControls": [str(p) for p in limb.fkControls],
                 "ikControl": str(limb.ikControl),
-                "effector": str(limb.effector),
-                "pole": str(limb.pole) if limb.pole is not None else "",
-                "fkOffsets": [_Matrix(m) for m in rest.fk],
-                "effectorOffset": _Matrix(rest.effector),
-                "poleDistance": float(rest.poleDistance or 0.0),
+                "pole": path(limb.pole),
+                "upperScale": path(limb.upperScale),
+                "lowerScale": path(limb.lowerScale),
+                "pin": path(limb.pin),
+                "twist": path(limb.twist),
+                "writable": sorted(str(p) for p in (limb.writable or ())),
             })
         return limbs
 
+    def _SpaceLabels(self):
+        """{space attribute path: its spaces' labels}, found in one walk."""
+        if getattr(self, "_spaceLabels", None) is None:
+            self._spaceLabels = {}
+            for prim in self.stage.Traverse():
+                if prim.GetTypeName() != "RigExecSpaceSwitch":
+                    continue
+                rel = prim.GetRelationship("rigExec:activeSpaceAttribute")
+                attr = prim.GetAttribute("rigExec:spaceLabels")
+                labels = [str(l) for l in (attr.Get() or [])] if attr else []
+                for target in (rel.GetTargets() if rel else []):
+                    self._spaceLabels[str(target)] = labels
+        return self._spaceLabels
+
     def Spaces(self):
-        """{space attribute path: the control it moves}, for every space
-        switch."""
+        """{space attribute path: {"control": the control it places,
+        "writable": the channels of it a matched switch may write}}. The
+        rig publishes each control's match row per space
+        (spaces:matchValues)."""
+        try:
+            import spaceMatch
+        except ImportError:
+            return {}
         spaces = {}
-        for prim in Usd.PrimRange(self.stage.GetPrimAtPath(self.rigPath)):
-            if prim.GetTypeName() != "RigExecSpaceSwitch":
+        for active, switch in spaceMatch.Switches(self.stage).items():
+            if not switch.control.HasPrefix(self.rigPath):
                 continue
-            attrs = prim.GetRelationship("rigExec:activeSpaceAttribute")
-            targets = prim.GetRelationship("rigExec:target")
-            if not attrs or not targets or not targets.GetTargets():
-                continue
-            for attr in attrs.GetTargets():
-                spaces[str(attr)] = str(targets.GetTargets()[0])
+            labels = self._SpaceLabels().get(str(active), [])
+            spaces[str(active)] = {"control": str(switch.control),
+                                   "writable": list(switch.writable),
+                                   "labels": labels}
         return spaces
 
 
@@ -381,8 +522,8 @@ def Bake(stagePath, rigPath, output):
         raise RuntimeError("usdRig's rigExecBake was not found at %s; build "
                            "usdRig first" % tool)
     result = subprocess.run(
-        [tool, stagePath, "--rig", str(rigPath), "--frames",
-         repr(BAKE_FRAME), "--poseable", "-o", output],
+        [tool, stagePath, "--rig", str(rigPath), "--time", repr(BAKE_FRAME),
+         "-o", output],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if result.returncode != 0 or not os.path.exists(output):
         raise RuntimeError("baking the rig failed:\n" +
